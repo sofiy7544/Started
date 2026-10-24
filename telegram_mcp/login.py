@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -84,7 +85,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Log in to Telegram for telegram_mcp")
     parser.add_argument("--phone", help="step 1: phone number, e.g. +79991234567")
     parser.add_argument("--code", help="step 2: login code from the Telegram app")
-    parser.add_argument("--password", help="step 2: two-step verification password, if enabled")
+    parser.add_argument(
+        "--password",
+        default=os.environ.get("TG_2FA_PASSWORD"),
+        help="step 2: two-step verification password (or env TG_2FA_PASSWORD)",
+    )
     parser.add_argument("--string-out", type=Path, help="where to write the session string")
     args = parser.parse_args()
 

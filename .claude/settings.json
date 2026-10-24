@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__telegram__search_contacts_or_chats",
+      "mcp__telegram__read_chat_history",
+      "mcp__telegram__get_unread_messages",
+      "mcp__telegram__request_human_handoff"
+    ],
+    "ask": [
+      "mcp__telegram__send_message",
+      "mcp__telegram__mark_as_read"
+    ]
+  },
+  "enabledMcpjsonServers": ["telegram"]
+}
