@@ -1,0 +1,9 @@
+# Секреты и сессия Telegram — НИКОГДА не коммитить
+.env
+*.session
+*.session-journal
+logs/
+.venv/
+venv/
+__pycache__/
+*.egg-info/

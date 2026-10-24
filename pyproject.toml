@@ -1,0 +1,21 @@
+[project]
+name = "telegram-userbot-mcp"
+version = "0.1.0"
+description = "MCP server that lets Claude Code act on your personal Telegram account (Telethon) with human-in-the-loop safeguards"
+requires-python = ">=3.10"
+dependencies = [
+    "telethon>=1.36,<2",
+    "mcp>=1.12,<2",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+telegram-mcp = "telegram_mcp.server:main"
+telegram-mcp-login = "telegram_mcp.login:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["telegram_mcp"]
