@@ -26,6 +26,7 @@ class Config:
     api_hash: str
     data_dir: Path
     session_path: Path
+    session_string: str | None
     log_dir: Path
     dry_run: bool
     confirm_mode: str  # "client" | "elicit"
@@ -62,6 +63,7 @@ def load_config() -> Config:
         api_hash=api_hash,
         data_dir=data_dir,
         session_path=Path(os.environ.get("TG_SESSION_PATH", data_dir / "userbot")).expanduser(),
+        session_string=os.environ.get("TG_SESSION_STRING") or None,
         log_dir=Path(os.environ.get("TG_LOG_DIR", data_dir / "logs")).expanduser(),
         dry_run=_bool("TG_DRY_RUN", False),
         confirm_mode=confirm_mode,

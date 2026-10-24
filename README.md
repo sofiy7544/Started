@@ -114,6 +114,32 @@ claude --append-system-prompt "$(cat /путь/к/Started/prompts/telegram_assis
 `%APPDATA%\Claude\claude_desktop_config.json` (Windows), укажите абсолютные пути и перезапустите приложение.
 Текст из `prompts/telegram_assistant.md` вставьте в инструкции проекта. Для Desktop советую `TG_CONFIRM_MODE=elicit`.
 
+## 4.1. Если нет ПК (только телефон)
+
+**Android — Termux** (всё работает на самом телефоне):
+```bash
+# Termux из F-Droid (версия из Google Play устарела)
+pkg update && pkg install python git nodejs-lts
+git clone <этот репозиторий> && cd Started && pip install -e .
+mkdir -p ~/.telegram-mcp && cp .env.example ~/.telegram-mcp/.env && nano ~/.telegram-mcp/.env
+python -m telegram_mcp.login                    # обычный интерактивный вход
+npm install -g @anthropic-ai/claude-code        # Termux официально не поддерживается, но обычно работает
+export TELEGRAM_MCP_PYTHON=python && cd assistant && claude
+```
+Если `pip` не может собрать `cryptography`: `pkg install python-cryptography` и повторите.
+
+**Облачная сессия Claude Code (Android и iPhone, через приложение Claude)**:
+1. В настройках облачного окружения откройте сетевой доступ к Telegram (уровень *Full*): серверы Telegram — это IP-адреса, а не домены, поэтому одного домена в списке разрешённых недостаточно.
+2. Вход в два шага без терминала (сессия хранится строкой, а не файлом — контейнер временный):
+   ```bash
+   python -m telegram_mcp.login --phone +79991234567
+   python -m telegram_mcp.login --code 12345 [--password ПАРОЛЬ_2FA] --string-out .secrets/session_string.txt
+   ```
+3. Значения `TG_API_ID`, `TG_API_HASH`, `TG_SESSION_STRING` (содержимое файла) добавьте в переменные окружения облачного окружения, затем удалите файл `.secrets/session_string.txt`.
+
+> Код входа из Telegram никому не пересылайте **внутри Telegram** — Telegram заблокирует такой вход.
+> Строка сессии = полный доступ к аккаунту.
+
 ## 5. Системные инструкции (стиль, вежливость, передача управления)
 
 Файл **`prompts/telegram_assistant.md`** подключается автоматически через `assistant/CLAUDE.md`.

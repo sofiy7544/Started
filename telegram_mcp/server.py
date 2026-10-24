@@ -25,6 +25,7 @@ from typing import Any
 from mcp.server.fastmcp import Context, FastMCP
 from pydantic import BaseModel, Field
 from telethon import TelegramClient, errors, functions, utils
+from telethon.sessions import StringSession
 from telethon.tl import types
 
 from .config import Config, ensure_private_dir, load_config
@@ -74,7 +75,9 @@ async def client() -> TelegramClient:
     async with _client_lock:
         if _client is None:
             c = cfg()
-            _client = TelegramClient(str(c.session_path), c.api_id, c.api_hash)
+            # TG_SESSION_STRING suits ephemeral/cloud hosts; otherwise use the session file.
+            session = StringSession(c.session_string) if c.session_string else str(c.session_path)
+            _client = TelegramClient(session, c.api_id, c.api_hash)
         if not _client.is_connected():
             await _client.connect()
             if not await _client.is_user_authorized():
