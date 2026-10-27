@@ -1,0 +1,39 @@
+[project]
+name = "companion-bot"
+version = "0.1.0"
+description = "Telegram-бот с виртуальным AI-персонажем на Claude API"
+requires-python = ">=3.12"
+dependencies = [
+    "aiogram>=3.20,<4",
+    "anthropic>=2.3,<3",
+    "asyncpg>=0.30,<1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=1.0", "ruff>=0.6"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]
+# Длинные строки — текст промптов, переносы в нём ни к чему.
+"src/companion/persona.py" = ["E501"]
+"src/companion/llm/prompts.py" = ["E501"]

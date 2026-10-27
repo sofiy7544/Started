@@ -1,0 +1,13 @@
+# Секреты и локальные данные — не коммитить
+.env
+.env.*
+!.env.example
+logs/
+backups/
+*.sql.gz
+*.dump
+*.log
+.pytest_cache/
+__pycache__/
+*.egg-info/
+.venv/
