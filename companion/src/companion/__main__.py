@@ -13,12 +13,13 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
 from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
 
-from companion import db
+from companion import db, pricing
 from companion.bot.app import AppContext, build_dispatcher, set_commands
 from companion.config import ConfigError, Settings
-from companion.llm.client import AnthropicLLM
+from companion.llm.client import AnthropicLLM, LLMError, LLMErrorKind
+from companion.logging_setup import setup_logging
 from companion.persona import load_persona
-from companion.repositories import users
+from companion.services import maintenance
 from companion.services.budget import BudgetGuard
 from companion.services.chat import ChatService
 from companion.services.limits import CircuitBreaker, RateLimiter
@@ -30,6 +31,25 @@ log = logging.getLogger("companion")
 def _check_anthropic_credentials() -> None:
     if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
         raise ConfigError("Не задана переменная окружения ANTHROPIC_API_KEY")
+
+
+async def check_models(llm: AnthropicLLM, settings: Settings) -> None:
+    """Ключ и модели проверяются при старте через Models API — бесплатно, без расхода токенов."""
+    for model in dict.fromkeys((settings.chat_model, settings.memory_model)):
+        if not pricing.is_known(model):
+            log.warning("цена модели %s неизвестна — бюджет считает её по максимальному тарифу", model)
+        try:
+            await llm.check_model(model)
+        except LLMError as exc:
+            if exc.kind is LLMErrorKind.AUTH:
+                raise ConfigError(
+                    "Anthropic отклонил ANTHROPIC_API_KEY — проверьте ключ в console.anthropic.com"
+                ) from exc
+            if exc.kind is LLMErrorKind.BAD_REQUEST:
+                raise ConfigError(
+                    f"Модель {model!r} недоступна для этого ключа — проверьте CHAT_MODEL / MEMORY_MODEL"
+                ) from exc
+            log.warning("Claude API сейчас недоступен, проверка модели %s пропущена: %s", model, exc)
 
 
 async def run(settings: Settings) -> None:
@@ -48,9 +68,9 @@ async def run(settings: Settings) -> None:
     )
     bot = Bot(settings.bot_token, session=session)
     chat: ChatService | None = None
+    maintenance_task: asyncio.Task[None] | None = None
     try:
         await db.apply_migrations(pool)
-        await users.prune_processed_updates(pool)
         budget = BudgetGuard(pool, settings)
         chat = ChatService(
             pool=pool,
@@ -69,6 +89,10 @@ async def run(settings: Settings) -> None:
             me = await bot.get_me()
         except TelegramUnauthorizedError as exc:
             raise ConfigError("Telegram отклонил BOT_TOKEN — проверьте токен у @BotFather") from exc
+        await check_models(llm, settings)
+        maintenance_task = asyncio.create_task(
+            maintenance.run_forever(pool, settings.message_retention_days)
+        )
         log.info(
             "bot @%s started: chat_model=%s budget=%s USD, spent this month=%s USD",
             me.username, settings.chat_model, settings.anthropic_monthly_budget_usd,
@@ -79,6 +103,8 @@ async def run(settings: Settings) -> None:
         await bot.delete_webhook(drop_pending_updates=False)
         await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
     finally:
+        if maintenance_task is not None:
+            maintenance_task.cancel()
         if chat is not None:
             await chat.wait_background()
         await bot.session.close()
@@ -93,13 +119,7 @@ def main() -> None:
     except ConfigError as exc:
         print(f"Ошибка конфигурации: {exc}\nСм. .env.example", file=sys.stderr)
         sys.exit(2)
-    logging.basicConfig(
-        level=settings.log_level.upper(),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-    # httpx/aiogram на уровне INFO логируют URL запросов — в них есть токен бота.
-    for noisy in ("httpx", "httpx2", "aiogram.event"):
-        logging.getLogger(noisy).setLevel(logging.WARNING)
+    setup_logging(settings.log_level)
     try:
         asyncio.run(run(settings))
     except ConfigError as exc:
@@ -113,6 +133,10 @@ def main() -> None:
         sys.exit(1)
     except KeyboardInterrupt:
         pass
+    except Exception:
+        # Трассировка без текста исключения (см. SafeFormatter), чтобы не вывести личные данные.
+        log.critical("бот остановлен из-за непредвиденной ошибки", exc_info=True)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

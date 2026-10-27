@@ -108,14 +108,16 @@ class ChatService:
 
     async def forget_memory(self, user: User) -> None:
         async with self._user_lock(user.id), self._pool.acquire() as conn, conn.transaction():
+            await memory.lock_memory(conn, user.id)  # ждём фоновое сжатие, если оно идёт
             await memory.clear_memory(conn, user.id)
             await conn.execute(
                 "UPDATE users SET context_from_message_id = 0 WHERE id = $1", user.id
             )
 
     async def delete_user(self, user: User) -> None:
-        async with self._user_lock(user.id):
-            await users.delete(self._pool, user.id)
+        async with self._user_lock(user.id), self._pool.acquire() as conn, conn.transaction():
+            await memory.lock_memory(conn, user.id)  # ждём фоновое сжатие, если оно идёт
+            await users.delete(conn, user.id)
         self._limiter.forget(user.id)
 
     # ---- переписка ------------------------------------------------------------------------
@@ -179,15 +181,22 @@ class ChatService:
             return ChatReply(ReplyKind.SKIPPED)
 
         input_chars = sum(len(b["text"]) for b in system) + sum(len(m["content"]) for m in messages)
-        if not await self._budget.can_afford(
+        reservation = await self._budget.reserve(
             model, input_chars=input_chars, max_output_tokens=self._settings.max_reply_tokens
-        ):
+        )
+        if reservation is None:
             return ChatReply(ReplyKind.BUDGET, texts.BUDGET_EXHAUSTED)
 
         try:
-            resp = await self._llm.chat(
-                model=model, system=system, messages=messages,
-                max_tokens=self._settings.max_reply_tokens,
+            resp = await self._budget.paid_call(
+                reservation,
+                lambda: self._llm.chat(
+                    model=model, system=system, messages=messages,
+                    max_tokens=self._settings.max_reply_tokens,
+                ),
+                lambda r: r,
+                operation="chat",
+                user_id=user_id,
             )
         except LLMError as exc:
             self._breaker.failure(exc.kind)
@@ -197,7 +206,6 @@ class ChatService:
             log.error("llm configuration error (check ANTHROPIC_API_KEY / model): %s", exc)
             return ChatReply(ReplyKind.UNAVAILABLE, texts.UNAVAILABLE)
         self._breaker.success()
-        await self._budget.record(resp, operation="chat", user_id=user_id)
 
         if resp.refused:
             return ChatReply(ReplyKind.REFUSED, texts.REFUSED)

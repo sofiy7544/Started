@@ -17,8 +17,6 @@ from companion.services.sensitive import is_sensitive, redact
 
 log = logging.getLogger(__name__)
 
-# Пространство имён advisory-блокировок суммаризации (второй ключ — users.id).
-_LOCK_NS = 7_041
 MAX_NEW_FACTS_PER_RUN = 6
 MAX_FACT_CHARS = 200
 MAX_NAME_CHARS = 40
@@ -67,10 +65,7 @@ class MemoryService:
     async def maybe_summarize(self, user_id: int) -> bool:
         """Сжимает старую часть переписки, если пора. True — если резюме сделано."""
         async with self._pool.acquire() as conn, conn.transaction():
-            locked = await conn.fetchval(
-                "SELECT pg_try_advisory_xact_lock($1, $2::int)", _LOCK_NS, user_id
-            )
-            if not locked:
+            if not await memory.try_lock_memory(conn, user_id):
                 return False  # уже сжимается другим обработчиком
             user = await users.get(conn, user_id)
             if user is None:
@@ -89,21 +84,27 @@ class MemoryService:
             known = await memory.list_facts(conn, user_id)
             transcript = format_transcript(batch, known, self._persona_name)
             model = self._settings.memory_model
-            if not await self._budget.can_afford(
+            reservation = await self._budget.reserve(
                 model, input_chars=len(transcript) + len(MEMORY_EXTRACTION_SYSTEM),
                 max_output_tokens=MEMORY_MAX_TOKENS,
-            ):
+            )
+            if reservation is None:
                 return False
             try:
-                extraction, resp = await self._llm.extract_memory(
-                    model=model, system=MEMORY_EXTRACTION_SYSTEM, transcript=transcript,
-                    max_tokens=MEMORY_MAX_TOKENS,
+                extraction, _ = await self._budget.paid_call(
+                    reservation,
+                    lambda: self._llm.extract_memory(
+                        model=model, system=MEMORY_EXTRACTION_SYSTEM, transcript=transcript,
+                        max_tokens=MEMORY_MAX_TOKENS,
+                    ),
+                    lambda r: r[1],
+                    operation="memory",
+                    user_id=user_id,
                 )
             except LLMError as exc:
                 # Не помечаем сжатым — попробуем при следующем сообщении; новых повторов тут нет.
                 log.warning("memory extraction failed for user=%s: %s", user_id, exc)
                 return False
-            await self._budget.record(resp, operation="memory", user_id=user_id)
 
             if extraction is not None:
                 await self._apply(conn, user_id, extraction, known)

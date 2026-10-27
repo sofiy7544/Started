@@ -142,3 +142,98 @@ def test_cli_reports_unreachable_database() -> None:
     r = _run_cli({"BOT_TOKEN": "1:x", "ANTHROPIC_API_KEY": "x",
                   "DATABASE_URL": "postgresql://u:p@127.0.0.1:1/db"})
     assert r.returncode == 1 and "базой данных" in r.stderr and "Traceback" not in r.stderr
+
+
+async def test_wrong_model_id_fails_at_startup_without_spending(servers) -> None:
+    from companion.config import ConfigError
+
+    tg, anth = servers
+    settings = Settings(bot_token="123456:TEST", database_url=TEST_DB, telegram_api_url=tg.url,
+                        chat_model="claude-haiku-9-9")
+    with pytest.raises(ConfigError, match="claude-haiku-9-9"):
+        await run(settings)
+    assert anth.requests == []  # платных запросов не было — только бесплатный Models API
+    assert anth.model_lookups == ["claude-haiku-9-9"]
+
+
+async def test_wrong_api_key_fails_at_startup(servers) -> None:
+    from companion.config import ConfigError
+
+    tg, anth = servers
+    anth.models_status = 401
+    settings = Settings(bot_token="123456:TEST", database_url=TEST_DB, telegram_api_url=tg.url)
+    with pytest.raises(ConfigError, match="ANTHROPIC_API_KEY"):
+        await run(settings)
+    assert anth.requests == []
+
+
+def test_cli_reports_unreachable_telegram() -> None:
+    r = _run_cli({"BOT_TOKEN": "1:x", "ANTHROPIC_API_KEY": "x", "DATABASE_URL": TEST_DB,
+                  "TELEGRAM_API_URL": "http://127.0.0.1:9"})
+    assert r.returncode == 1 and "нет связи с Telegram" in r.stderr
+    assert "Traceback" not in r.stderr and "1:x" not in r.stderr  # токен не выводится
+
+
+def test_cli_wrong_key_and_model_messages() -> None:
+    """Через настоящий CLI: понятное сообщение, код 2, без traceback и без секретов."""
+    import threading
+
+    loop = asyncio.new_event_loop()
+    tg, anth = FakeTelegram(), FakeAnthropic()
+    anth.models_status = 401
+    started = threading.Event()
+
+    def serve() -> None:
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(tg.start())
+        loop.run_until_complete(anth.start())
+        started.set()
+        loop.run_forever()
+
+    t = threading.Thread(target=serve, daemon=True)
+    t.start()
+    started.wait(5)
+    try:
+        env = {"BOT_TOKEN": "123:SECRETTOKEN", "ANTHROPIC_API_KEY": "sk-secret-key",
+               "DATABASE_URL": TEST_DB, "TELEGRAM_API_URL": tg.url, "ANTHROPIC_BASE_URL": anth.url}
+        r = _run_cli(env)
+        assert r.returncode == 2 and "ANTHROPIC_API_KEY" in r.stderr
+        anth.models_status = 200
+        r = _run_cli({**env, "CHAT_MODEL": "claude-nonexistent"})
+        assert r.returncode == 2 and "claude-nonexistent" in r.stderr
+        for out in (r.stdout, r.stderr):
+            assert "SECRETTOKEN" not in out and "sk-secret-key" not in out and "Traceback" not in out
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        t.join(5)
+
+
+def test_live_check_script_runs_against_fake_api() -> None:
+    """Скрипт живой проверки работает (здесь — против фейкового API, без затрат)."""
+    import threading
+
+    loop = asyncio.new_event_loop()
+    anth = FakeAnthropic(text="Я виртуальная собеседница на основе ИИ, Саша. Про поход и горы помню.")
+    started = threading.Event()
+
+    def serve() -> None:
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(anth.start())
+        started.set()
+        loop.run_forever()
+
+    t = threading.Thread(target=serve, daemon=True)
+    t.start()
+    started.wait(5)
+    try:
+        base = {"PATH": os.environ["PATH"], "PYTHONPATH": str(PROJECT_ROOT / "src"),
+                "ANTHROPIC_API_KEY": "k", "ANTHROPIC_BASE_URL": anth.url}
+        script = str(PROJECT_ROOT / "scripts" / "live_check.py")
+        r = subprocess.run([sys.executable, script], env=base, capture_output=True, text=True, timeout=30)
+        assert r.returncode == 1 and "--yes" in r.stdout and anth.requests == []  # без --yes ни одного запроса
+        r = subprocess.run([sys.executable, script, "--yes"], env=base, capture_output=True, text=True, timeout=60)
+        assert "Итого:" in r.stdout and len(anth.requests) == 7
+        assert "[«ты настоящая?»]" in r.stdout
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        t.join(5)

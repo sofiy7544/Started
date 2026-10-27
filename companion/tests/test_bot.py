@@ -175,3 +175,47 @@ async def test_api_failure_message_reaches_user(harness, llm) -> None:
     await send(lambda: tg.push_callback(USER, AGE_OK))
     llm.replies = [LLMError(LLMErrorKind.TEMPORARY, "529")]
     assert await send(lambda: tg.push_text(USER, "привет")) == [texts.TEMPORARY_ERROR]
+
+
+async def test_handler_crash_logs_no_user_text(harness, service, monkeypatch, caplog) -> None:
+    import logging
+
+    from companion.logging_setup import SafeFormatter
+
+    send, tg, *_ = harness
+    await send(lambda: tg.push_text(USER, "/start"))
+    await send(lambda: tg.push_callback(USER, AGE_OK))
+
+    async def boom(user, text):
+        raise RuntimeError(f"упало на тексте: {text}")
+
+    monkeypatch.setattr(service, "handle_message", boom)
+    caplog.set_level(logging.ERROR)
+    out = await send(lambda: tg.push_text(USER, "мой домашний адрес секрет"))
+    assert out == [texts.INTERNAL_ERROR]  # пользователь видит понятное сообщение, не traceback
+    formatted = "\n".join(SafeFormatter("%(message)s").format(r) for r in caplog.records)
+    assert "RuntimeError" in formatted
+    assert "домашний адрес" not in formatted
+
+
+async def test_other_user_cannot_delete_or_read_via_buttons(harness, pool, service) -> None:
+    """Callback с чужого аккаунта (даже на сообщение в чате USER) действует только на свои данные."""
+    send, tg, dp, bot = harness
+    await send(lambda: tg.push_text(USER, "/start"))
+    await send(lambda: tg.push_callback(USER, AGE_OK))
+    await send(lambda: tg.push_text(USER, "привет"))
+    me = await service.find_user(USER)
+    await memory.add_facts(pool, me.id, [("interest", "Любит джаз")], max_facts=60, max_threads=5)
+
+    for data in (FORGET_ALL + ":yes", FORGET_MEMORY + ":yes"):
+        tg.push_callback(OTHER, data, message_id=1)
+        update = tg.updates.get_nowait()
+        update["callback_query"]["message"]["chat"]["id"] = USER  # «чужое» сообщение
+        await dp.feed_raw_update(bot, update)
+    await service.wait_background()
+    assert await service.find_user(USER) is not None
+    assert [f.text for f in await memory.list_facts(pool, me.id)] == ["Любит джаз"]
+    assert (await service.memory_snapshot(me)).messages_count == 2
+
+    shown = await send(lambda: tg.push_text(OTHER, "/memory"))
+    assert "Любит джаз" not in shown[0]

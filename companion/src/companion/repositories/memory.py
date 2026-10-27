@@ -11,6 +11,23 @@ Conn = asyncpg.Pool | asyncpg.Connection
 
 FACT_CATEGORIES = ("name", "interest", "preference", "fact", "thread")
 
+# Пространство имён advisory-блокировок памяти пользователя (второй ключ — users.id).
+# Её держит суммаризация на время вызова модели; очистка и удаление ждут её,
+# иначе резюме и факты удалённой переписки записались бы уже после удаления.
+_MEMORY_LOCK_NS = 7_041
+
+
+async def try_lock_memory(conn: asyncpg.Connection, user_id: int) -> bool:
+    """Неблокирующая попытка (внутри транзакции): False — память уже обрабатывается."""
+    return await conn.fetchval(
+        "SELECT pg_try_advisory_xact_lock($1, $2::int)", _MEMORY_LOCK_NS, user_id
+    )
+
+
+async def lock_memory(conn: asyncpg.Connection, user_id: int) -> None:
+    """Дождаться окончания текущей обработки памяти пользователя (внутри транзакции)."""
+    await conn.execute("SELECT pg_advisory_xact_lock($1, $2::int)", _MEMORY_LOCK_NS, user_id)
+
 
 @dataclass(frozen=True)
 class StoredMessage:
@@ -120,6 +137,15 @@ async def delete_old_summarized(conn: Conn, user_id: int, retention_days: int) -
            WHERE user_id = $1 AND summarized
              AND created_at < now() - make_interval(days => $2)""",
         user_id,
+        retention_days,
+    )
+    return int(result.split()[-1])
+
+
+async def delete_expired_messages(conn: Conn, retention_days: int) -> int:
+    """Срок хранения: сообщения старше retention_days удаляются у всех пользователей."""
+    result = await conn.execute(
+        "DELETE FROM messages WHERE created_at < now() - make_interval(days => $1)",
         retention_days,
     )
     return int(result.split()[-1])

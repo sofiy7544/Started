@@ -188,3 +188,45 @@ async def test_parallel_dialogs_do_not_leak_between_users(pool, make_service) ->
         assert not ("alice-" in transcript and "bob-" in transcript)
     a_msgs = await memory.context_messages(pool, alice.id, 0, 100)
     assert all("bob" not in m.content for m in a_msgs)
+
+
+class SlowExtractLLM(FakeLLM):
+    """Модель «думает» над памятью долго — чтобы /forget успел прийти во время сжатия."""
+
+    started = 0
+
+    async def extract_memory(self, **kw):
+        self.started += 1
+        await asyncio.sleep(0.3)
+        return await super().extract_memory(**kw)
+
+
+async def test_forget_during_summarization_does_not_resurrect_facts(pool, make_service) -> None:
+    llm = SlowExtractLLM()
+    llm.extractions = [extraction("Резюме удалённого.", name="Петя", facts=[("interest", "Любит джаз")])]
+    service = make_service(llm_override=llm)
+    user = await new_user(pool, 1)
+    for i in range(4):
+        await service.handle_message(user, f"сообщение {i}")
+    await asyncio.sleep(0.1)
+    assert llm.started == 1  # сжатие уже идёт (ждёт модель)
+    await service.forget_memory(user)
+    await service.wait_background()
+    snap = await service.memory_snapshot(user)
+    assert (snap.facts, snap.summaries_count, snap.messages_count) == ([], 0, 0)
+
+
+async def test_delete_during_summarization_leaves_nothing(pool, make_service) -> None:
+    llm = SlowExtractLLM()
+    llm.extractions = [extraction("Резюме.", facts=[("interest", "Любит джаз")])]
+    service = make_service(llm_override=llm)
+    user = await new_user(pool, 1)
+    for i in range(4):
+        await service.handle_message(user, f"сообщение {i}")
+    await asyncio.sleep(0.1)
+    assert llm.started == 1
+    await service.delete_user(user)
+    await service.wait_background()
+    for table in ("users", "messages", "memory_facts", "conversation_summaries"):
+        col = "id" if table == "users" else "user_id"
+        assert await pool.fetchval(f"SELECT count(*) FROM {table} WHERE {col} = $1", user.id) == 0

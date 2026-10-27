@@ -99,6 +99,8 @@ class Settings:
                 raise ConfigError(f"{name.upper()} должен быть больше нуля")
         if self.llm_max_retries < 0 or self.llm_max_retries > 5:
             raise ConfigError("LLM_MAX_RETRIES должен быть от 0 до 5")
+        if self.llm_effort not in ("low", "medium", "high", "xhigh", "max"):
+            raise ConfigError("LLM_EFFORT должен быть одним из: low, medium, high, xhigh, max")
         if self.anthropic_monthly_budget_usd < 0:
             raise ConfigError("ANTHROPIC_MONTHLY_BUDGET_USD не может быть отрицательным")
 

@@ -192,10 +192,26 @@ def test_circuit_breaker_opens_and_recovers() -> None:
 
 # ---- прочее ---------------------------------------------------------------------------------
 
-def test_pricing_and_unknown_model_is_expensive() -> None:
-    assert pricing.cost_usd("claude-haiku-5-5", input_tokens=1_000_000, output_tokens=0) == Decimal("0.1")
-    assert pricing.cost_usd("claude-sonnet-5-5", input_tokens=0, output_tokens=1_000_000) == Decimal("10")
-    assert pricing.cost_usd("unknown", input_tokens=1_000_000, output_tokens=0) == Decimal("10")
+def test_pricing_matches_official_table() -> None:
+    """Цены с https://platform.claude.com/docs/en/about-claude/pricing (2026-10-27)."""
+    c = pricing.cost_usd
+    # Haiku 5.5, промпт до 100 000 токенов: $0.10 вход, $0.50 выход, $0.01 кэш-чтение, $0.125 запись.
+    assert c("claude-haiku-5-5", input_tokens=10_000, output_tokens=1_000) == Decimal("0.0015")
+    assert c("claude-haiku-5-5", input_tokens=0, output_tokens=0, cache_read_tokens=50_000) == Decimal("0.0005")
+    assert c("claude-haiku-5-5", input_tokens=0, output_tokens=0, cache_write_tokens=80_000) == Decimal("0.01")
+    # Больше 100 000 токенов промпта (с учётом кэша) — весь запрос по $0.50 / $2.50.
+    assert c("claude-haiku-5-5", input_tokens=60_000, output_tokens=1_000,
+             cache_read_tokens=50_000) == Decimal("0.035")  # 0.03 + 0.0025 + 0.0025
+    # Sonnet 5.5: $2 / $10, кэш-чтение $0.10 (0.05x), запись $2.50.
+    assert c("claude-sonnet-5-5", input_tokens=0, output_tokens=100_000) == Decimal("1")
+    assert c("claude-sonnet-5-5", input_tokens=0, output_tokens=0, cache_read_tokens=1_000_000) == Decimal("0.1")
+    # Opus 5.5: $4 / $20, кэш-чтение $0.20.
+    assert c("claude-opus-5-5", input_tokens=50_000, output_tokens=15_000) == Decimal("0.5")
+
+
+def test_unknown_model_is_priced_conservatively() -> None:
+    assert not pricing.is_known("claude-something-new")
+    assert pricing.cost_usd("claude-something-new", input_tokens=100_000, output_tokens=0) == Decimal("1")
 
 
 def test_split_message_respects_telegram_limit() -> None:
@@ -211,3 +227,22 @@ def test_split_message_respects_telegram_limit() -> None:
 def test_trim_to_sentence() -> None:
     assert trim_to_sentence("Первая мысль. Вторая мысль, которая оборвал") == "Первая мысль."
     assert trim_to_sentence("без точек вообще") == "без точек вообще…"
+
+
+def test_safe_formatter_hides_exception_messages() -> None:
+    import logging
+
+    from companion.logging_setup import SafeFormatter
+
+    try:
+        try:
+            raise ValueError("DETAIL: Key (user_id, fact_norm)=(5, любит джаз)")
+        except ValueError as inner:
+            raise RuntimeError("input_value='мой секрет'") from inner
+    except RuntimeError:
+        import sys
+        record = logging.LogRecord("x", logging.ERROR, __file__, 1, "ошибка", None, sys.exc_info())
+    out = SafeFormatter("%(message)s").format(record)
+    assert "ошибка" in out and "RuntimeError" in out and "ValueError" in out
+    assert "любит джаз" not in out and "мой секрет" not in out
+    assert "test_units.py" in out  # место ошибки сохраняется для отладки

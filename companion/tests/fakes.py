@@ -164,8 +164,23 @@ class FakeAnthropic:
         self.stop_reason = "end_turn"
         self.memory_json = {"summary": "Познакомились.", "preferred_name": None,
                             "new_facts": [], "obsolete_fact_ids": []}
+        self.known_models = {"claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"}
+        self.models_status = 200
+        self.model_lookups: list[str] = []
         self.runner: web.AppRunner | None = None
         self.url = ""
+
+    async def _model(self, request: web.Request) -> web.Response:
+        model = request.match_info["model"]
+        self.model_lookups.append(model)
+        if self.models_status != 200:
+            return web.json_response({"type": "error", "error": {"type": "authentication_error",
+                                      "message": "fake"}}, status=self.models_status)
+        if model not in self.known_models:
+            return web.json_response({"type": "error", "error": {"type": "not_found_error",
+                                      "message": f"model: {model}"}}, status=404)
+        return web.json_response({"type": "model", "id": model, "display_name": model,
+                                  "created_at": "2026-10-01T00:00:00Z"})
 
     async def _handle(self, request: web.Request) -> web.Response:
         body = await request.json()
@@ -180,7 +195,10 @@ class FakeAnthropic:
                 headers={"retry-after": "0"},
             )
         is_memory = "format" in (body.get("output_config") or {})
-        text = json.dumps(self.memory_json, ensure_ascii=False) if is_memory else self.text
+        if is_memory:
+            text = json.dumps(self.memory_json, ensure_ascii=False) if self.memory_json else '{"summary": "обрыв'
+        else:
+            text = self.text
         return web.json_response({
             "id": "msg_fake", "type": "message", "role": "assistant", "model": body["model"],
             "content": [{"type": "text", "text": text}],
@@ -192,6 +210,7 @@ class FakeAnthropic:
     async def start(self) -> str:
         app = web.Application()
         app.router.add_post("/v1/messages", self._handle)
+        app.router.add_get("/v1/models/{model}", self._model)
         self.runner = web.AppRunner(app)
         await self.runner.setup()
         site = web.TCPSite(self.runner, "127.0.0.1", 0)

@@ -35,8 +35,11 @@
 * **Все запросы к пользовательским данным содержат `WHERE user_id = $1`.** Удаление
   фактов «по совету модели» дополнительно ограничено id, которые модели показали.
 * **Секреты только из окружения** (`Settings.from_env`), в коде и git их нет.
-* **Деньги проверяются до вызова** по верхней оценке стоимости.
+* **Деньги резервируются до вызова** (атомарно, с учётом параллельных запросов) и
+  списываются по фактическому `usage`; таймаут и отмена — по верхней оценке.
 * **Логи без текста переписки**: id пользователя, модель, токены, стоимость, тип ошибки.
+  `SafeFormatter` печатает в трассировках только типы исключений и места в коде, а не их
+  сообщения: в них могут оказаться пользовательские данные (DETAIL у asyncpg, input_value у pydantic).
 
 ## 2. Модель и расходы
 
@@ -50,6 +53,9 @@
 Если поставить `CHAT_MODEL=claude-sonnet-5-5`, для неё автоматически включается
 серверный `fallbacks: "default"` (при отказе классификатора запрос повторяется на
 другой модели; выключается `LLM_REFUSAL_FALLBACKS=0`).
+
+Цены и идентификаторы сверены с документацией Anthropic 2026-10-27 (см. README, раздел 6);
+при старте ключ и модели проверяются бесплатным Models API.
 
 Ограничители: `MAX_REPLY_TOKENS` (1000), `MAX_CONTEXT_MESSAGES` (40),
 `MAX_CONTEXT_CHARS` (16000), `MAX_USER_MESSAGE_CHARS` (2000), `MESSAGES_PER_MINUTE` (8),
@@ -79,15 +85,22 @@
 `MESSAGE_RETENTION_DAYS`.
 
 Параллельность: ответы одному пользователю сериализуются `asyncio.Lock`;
-суммаризация защищена `pg_try_advisory_xact_lock(ns, user_id)`; ответ хранит
+суммаризация держит `pg_try_advisory_xact_lock(ns, user_id)` на время вызова модели,
+а `/forget` и полное удаление берут ту же блокировку (блокирующе) и ждут её — иначе
+резюме и факты удаляемой переписки записались бы уже после удаления. Ответ хранит
 `reply_to_id`, поэтому в истории он стоит сразу за своим вопросом.
+
+Срок хранения: фоновая задача раз в 6 часов удаляет сообщения старше
+`MESSAGE_RETENTION_DAYS` у всех пользователей, включая неактивных (`services/maintenance.py`).
+Резюме и факты хранятся до `/forget`; в контекст идут только 4 последних резюме.
 
 ## 4. Структура каталогов
 
 ```
 companion/
 ├── persona/mira.toml          характер, биография, речь (меняется без кода)
-├── migrations/001_init.sql    схема БД (применяется автоматически при старте)
+├── migrations/                схема БД: 001_init.sql, 002_retention.sql (автоматически при старте)
+├── scripts/live_check.py      ручная проверка характера на настоящем API (платно, < $0.01)
 ├── src/companion/
 │   ├── __main__.py            запуск: python -m companion
 │   ├── config.py              Settings из переменных окружения
@@ -103,12 +116,14 @@ companion/
 │   ├── services/budget.py     BudgetGuard
 │   ├── services/limits.py     RateLimiter, CircuitBreaker
 │   ├── services/sensitive.py  маскирование данных
+│   ├── services/maintenance.py срок хранения переписки
+│   ├── logging_setup.py       логи без текста исключений
 │   └── bot/                   aiogram: app.py, handlers/commands.py, handlers/chat.py
 ├── tests/                     pytest на реальном PostgreSQL + фейковые API
 ├── Dockerfile, docker-compose.yml, .env.example
 ```
 
-## 5. Схема базы данных (001_init.sql)
+## 5. Схема базы данных (001_init.sql + 002_retention.sql)
 
 ```
 users(id, tg_user_id UNIQUE, first_name, language_code, age_confirmed_at,
@@ -118,7 +133,7 @@ messages(id, user_id → users CASCADE, role user|assistant, content (маски
 conversation_summaries(id, user_id → users CASCADE, content, first/last_message_id, created_at)
 memory_facts(id, user_id → users CASCADE, category, fact, fact_norm,
              UNIQUE(user_id, fact_norm), created_at, updated_at)
-api_usage(id, provider, model, operation chat|memory, user_id → users SET NULL,
+api_usage(id, provider, model, operation chat|memory|*_unconfirmed, user_id → users SET NULL,
           input/output/cache_read/cache_write tokens, cost_usd, created_at)
 processed_updates(update_id PK, created_at)   — защита от повторной обработки
 ```

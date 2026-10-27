@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
 import anthropic
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 log = logging.getLogger(__name__)
 
@@ -56,6 +56,31 @@ class MemoryExtraction(BaseModel):
     )
 
 
+# JSON Schema для structured output памяти (strict: все поля обязательны, без лишних).
+MEMORY_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["summary", "preferred_name", "new_facts", "obsolete_fact_ids"],
+    "properties": {
+        "summary": {"type": "string"},
+        "preferred_name": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        "new_facts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["category", "text"],
+                "properties": {
+                    "category": {"type": "string", "enum": ["interest", "preference", "fact", "thread"]},
+                    "text": {"type": "string"},
+                },
+            },
+        },
+        "obsolete_fact_ids": {"type": "array", "items": {"type": "integer"}},
+    },
+}
+
+
 class LLMErrorKind(enum.Enum):
     AUTH = "auth"  # неверный/отозванный ключ, нет доступа — нужна правка конфигурации
     TEMPORARY = "temporary"  # 429, 5xx, перегрузка, сеть, таймаут — после повторов SDK
@@ -63,11 +88,16 @@ class LLMErrorKind(enum.Enum):
 
 
 class LLMError(RuntimeError):
-    """Ошибка вызова модели. Текст переписки в сообщение не попадает."""
+    """Ошибка вызова модели. Текст переписки в сообщение не попадает.
 
-    def __init__(self, kind: LLMErrorKind, detail: str) -> None:
+    possible_billed_attempts > 0 — исход неизвестен (таймаут): Anthropic мог успеть
+    сгенерировать и выставить счёт за столько попыток, хотя ответа мы не получили.
+    """
+
+    def __init__(self, kind: LLMErrorKind, detail: str, possible_billed_attempts: int = 0) -> None:
         super().__init__(f"{kind.value}: {detail}")
         self.kind = kind
+        self.possible_billed_attempts = possible_billed_attempts
 
 
 class LLMClient(Protocol):
@@ -81,11 +111,14 @@ class LLMClient(Protocol):
     ) -> tuple[MemoryExtraction | None, LLMResponse]: ...
 
 
-def classify_error(exc: anthropic.APIError) -> LLMError:
+def classify_error(exc: anthropic.APIError, max_retries: int = 0) -> LLMError:
     status = getattr(exc, "status_code", None)
     detail = f"{type(exc).__name__} status={status} request_id={getattr(exc, 'request_id', None)}"
     if isinstance(exc, (anthropic.AuthenticationError, anthropic.PermissionDeniedError)):
         return LLMError(LLMErrorKind.AUTH, detail)
+    if isinstance(exc, anthropic.APITimeoutError):
+        # Запрос дошёл, но ответа не дождались — каждая попытка могла быть оплачена.
+        return LLMError(LLMErrorKind.TEMPORARY, detail, possible_billed_attempts=max_retries + 1)
     if isinstance(exc, (anthropic.RateLimitError, anthropic.APIConnectionError)):
         return LLMError(LLMErrorKind.TEMPORARY, detail)
     if isinstance(exc, anthropic.APIStatusError) and (status or 0) >= 500:
@@ -122,6 +155,7 @@ class AnthropicLLM:
         # Ключ SDK берёт из ANTHROPIC_API_KEY. Повторы 408/409/429/5xx/сеть с экспоненциальной
         # задержкой делает сам SDK, ровно max_retries раз — своих циклов повторов нет.
         self._client = client or anthropic.AsyncAnthropic(max_retries=max_retries, timeout=timeout)
+        self._max_retries = self._client.max_retries
         self._effort = effort
         self._fallbacks = refusal_fallbacks
 
@@ -147,7 +181,7 @@ class AnthropicLLM:
             else:
                 resp = await self._client.messages.create(**kwargs)
         except anthropic.APIError as exc:
-            raise classify_error(exc) from exc
+            raise classify_error(exc, self._max_retries) from exc
 
         refused = resp.stop_reason == "refusal"
         if refused:
@@ -165,21 +199,37 @@ class AnthropicLLM:
     async def extract_memory(
         self, *, model: str, system: str, transcript: str, max_tokens: int,
     ) -> tuple[MemoryExtraction | None, LLMResponse]:
+        # create + своя валидация, а не messages.parse: parse бросает исключение на обрезанном
+        # JSON, и тогда теряется usage (деньги уже потрачены), а текст ошибки содержит факты.
         try:
-            resp = await self._client.messages.parse(
+            resp = await self._client.messages.create(
                 model=model,
                 max_tokens=max_tokens,
                 system=system,
                 messages=[{"role": "user", "content": transcript}],
-                output_format=MemoryExtraction,
-                output_config={"effort": "low"},
+                output_config={
+                    "effort": "low",
+                    "format": {"type": "json_schema", "schema": MEMORY_SCHEMA},
+                },
             )
         except anthropic.APIError as exc:
-            raise classify_error(exc) from exc
+            raise classify_error(exc, self._max_retries) from exc
 
-        ok = resp.stop_reason not in ("refusal", "max_tokens")
-        return (resp.parsed_output if ok else None), LLMResponse(
+        parsed: MemoryExtraction | None = None
+        if resp.stop_reason not in ("refusal", "max_tokens"):
+            try:
+                parsed = MemoryExtraction.model_validate_json(_text(resp))
+            except ValidationError:
+                log.warning("memory extraction: invalid JSON from model=%s", resp.model)
+        return parsed, LLMResponse(
             text="", requested_model=model, served_model=resp.model or model,
             usage=_usage(resp), refused=resp.stop_reason == "refusal",
             truncated=resp.stop_reason == "max_tokens",
         )
+
+    async def check_model(self, model: str) -> None:
+        """Проверка ключа и идентификатора модели через Models API (бесплатно, токены не тратятся)."""
+        try:
+            await self._client.models.retrieve(model)
+        except anthropic.APIError as exc:
+            raise classify_error(exc) from exc
