@@ -1,0 +1,101 @@
+"""Запуск: python -m pai"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import sys
+
+from aiogram import Bot
+from aiogram.client.telegram import TelegramAPIServer
+from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
+from sqlalchemy.exc import SQLAlchemyError
+
+from pai.bot.app import AppContext, build_dispatcher, set_commands
+from pai.bot.session import EnvAwareSession
+from pai.config import ConfigError, Settings, load_settings
+from pai.db import engine as db
+from pai.llm.catalog import load_catalog
+from pai.llm.checks import verify_catalog
+from pai.llm.engine import ChatEngine, PydanticAIEngine
+from pai.logging_setup import setup_logging
+from pai.services.assistant import Assistant
+from pai.services.budget import BudgetGuard
+from pai.services.limits import CircuitBreaker, RateLimiter
+
+log = logging.getLogger("pai")
+
+
+def read_instructions(settings: Settings) -> str:
+    try:
+        return settings.instructions_file.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise ConfigError(f"не найден файл инструкций: {settings.instructions_file}") from exc
+
+
+async def run(settings: Settings, *, engine: ChatEngine | None = None, verify: bool = True) -> None:
+    catalog = load_catalog(settings.models_file)
+    instructions = read_instructions(settings)
+    await db.upgrade(settings.database_url)
+    sql = db.make_engine(settings.database_url)
+    sessions = db.make_sessionmaker(sql)
+    session = (EnvAwareSession(api=TelegramAPIServer.from_base(settings.telegram_api_url))
+               if settings.telegram_api_url else EnvAwareSession())
+    bot = Bot(settings.bot_token.get_secret_value(), session=session)
+    try:
+        try:
+            me = await bot.get_me()
+        except TelegramUnauthorizedError as exc:
+            raise ConfigError("Telegram отклонил BOT_TOKEN — проверьте токен у @BotFather") from exc
+        if verify:
+            catalog = await verify_catalog(catalog, settings)
+        assistant = Assistant(
+            sessions=sessions, settings=settings, catalog=catalog,
+            engine=engine or PydanticAIEngine(settings),
+            budget=BudgetGuard(sessions, monthly_limit_usd=settings.monthly_budget_usd,
+                               disabled=settings.paid_apis_disabled,
+                               attempts_per_call=settings.llm_max_retries + 1),
+            rate_limiter=RateLimiter(settings.messages_per_minute),
+            breaker=CircuitBreaker(settings.breaker_failure_threshold, settings.breaker_cooldown_seconds),
+            base_instructions=instructions,
+        )
+        dp = build_dispatcher(AppContext(settings, assistant, sessions))
+        await set_commands(bot)
+        await bot.delete_webhook(drop_pending_updates=False)
+        available = ", ".join(m.id for m in catalog.available(settings))
+        log.info("бот @%s запущен; доступ: %d ID; модели: %s; бюджет $%s, потрачено $%s",
+                 me.username, len(settings.allowed_telegram_ids), available,
+                 settings.monthly_budget_usd, await assistant.budget.spent_this_month())
+        await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
+    finally:
+        await bot.session.close()
+        await sql.dispose()
+
+
+def main() -> None:
+    try:
+        settings = load_settings()
+    except ConfigError as exc:
+        print(f"Ошибка настройки: {exc}\nОткройте файл .env (образец — .env.example).", file=sys.stderr)
+        sys.exit(2)
+    setup_logging(settings.log_level)
+    try:
+        asyncio.run(run(settings))
+    except ConfigError as exc:
+        print(f"Ошибка настройки: {exc}", file=sys.stderr)
+        sys.exit(2)
+    except TelegramNetworkError as exc:
+        log.error("нет связи с Telegram: %s", exc)
+        sys.exit(1)
+    except (OSError, SQLAlchemyError) as exc:
+        log.error("ошибка базы данных или сети: %s", type(exc).__name__)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        pass
+    except Exception:
+        log.critical("бот остановлен из-за непредвиденной ошибки", exc_info=True)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

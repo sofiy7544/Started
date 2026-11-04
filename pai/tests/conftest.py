@@ -1,0 +1,144 @@
+from __future__ import annotations
+
+import os
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+
+import pytest
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, UserPromptPart
+from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.usage import RequestUsage
+
+from pai.config import PROJECT_ROOT, Settings
+from pai.db import engine as db
+from pai.llm.catalog import load_catalog
+from pai.llm.engine import PydanticAIEngine
+from pai.services.assistant import Assistant
+from pai.services.budget import BudgetGuard
+from pai.services.limits import CircuitBreaker, RateLimiter
+
+os.environ.setdefault("PYDANTIC_AI_NO_BANNER", "1")
+OWNER = 111
+STRANGER = 999
+
+
+@dataclass
+class Seen:
+    model_name: str
+    messages: list[ModelMessage]
+    instructions: str | None
+
+    @property
+    def user_prompts(self) -> list[str]:
+        return [p.content for m in self.messages if isinstance(m, ModelRequest)
+                for p in m.parts if isinstance(p, UserPromptPart) and isinstance(p.content, str)]
+
+    @property
+    def assistant_texts(self) -> list[str]:
+        return [p.content for m in self.messages if isinstance(m, ModelResponse)
+                for p in m.parts if isinstance(p, TextPart)]
+
+
+@dataclass
+class Script:
+    """Подставная модель: отвечает по сценарию и запоминает, что получила."""
+
+    replies: list[str | Exception] = field(default_factory=list)
+    seen: list[Seen] = field(default_factory=list)
+    input_tokens: int = 1000
+    output_tokens: int = 100
+
+    async def fn(self, messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        self.seen.append(Seen(info.model_settings and "", list(messages), info.instructions))
+        item = self.replies.pop(0) if self.replies else f"ответ {len(self.seen)}"
+        if isinstance(item, Exception):
+            raise item
+        return ModelResponse(parts=[TextPart(item)],
+                             usage=RequestUsage(input_tokens=self.input_tokens, output_tokens=self.output_tokens))
+
+
+@pytest.fixture(autouse=True)
+def _isolated_environment():
+    """Ключи провайдеров из окружения не должны влиять на тесты, а движок, кладущий
+    их в os.environ, — на следующие тесты."""
+    saved = dict(os.environ)
+    for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OLLAMA_BASE_URL", "BOT_TOKEN",
+                 "ALLOWED_TELEGRAM_IDS"):
+        os.environ.pop(name, None)
+    yield
+    os.environ.clear()
+    os.environ.update(saved)
+
+
+@pytest.fixture
+def db_url(tmp_path) -> str:
+    return f"sqlite+aiosqlite:///{(tmp_path / 'test.db').as_posix()}"
+
+
+@pytest.fixture
+def settings(db_url) -> Settings:
+    return Settings(
+        _env_file=None,
+        bot_token="123456:TEST",
+        allowed_telegram_ids=[OWNER],
+        openai_api_key="test-key",
+        database_url=db_url,
+    )
+
+
+@pytest.fixture
+async def sessions(db_url):
+    await db.upgrade(db_url)
+    engine = db.make_engine(db_url)
+    yield db.make_sessionmaker(engine)
+    await engine.dispose()
+
+
+@pytest.fixture
+def script() -> Script:
+    return Script()
+
+
+class Clock:
+    def __init__(self) -> None:
+        self.t = 1000.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
+@pytest.fixture
+def clock() -> Clock:
+    return Clock()
+
+
+AssistantFactory = Callable[..., Assistant]
+
+
+@pytest.fixture
+def make_assistant(sessions, settings, script, clock) -> AssistantFactory:
+    def factory(*, settings_override: dict | None = None, script_override: Script | None = None,
+                sessions_override=None) -> Assistant:
+        s = settings.model_copy(update=settings_override or {})
+        sc = script_override or script
+        sess = sessions_override or sessions
+        engine = PydanticAIEngine(
+            s, model_factory=lambda m: FunctionModel(sc.fn, model_name=m.provider_model_name)
+        )
+        return Assistant(
+            sessions=sess, settings=s, catalog=load_catalog(s.models_file), engine=engine,
+            budget=BudgetGuard(sess, monthly_limit_usd=s.monthly_budget_usd,
+                               disabled=s.paid_apis_disabled, attempts_per_call=s.llm_max_retries + 1),
+            rate_limiter=RateLimiter(s.messages_per_minute, clock=clock),
+            breaker=CircuitBreaker(s.breaker_failure_threshold, s.breaker_cooldown_seconds, clock=clock),
+            base_instructions=(PROJECT_ROOT / "config" / "assistant.md").read_text(encoding="utf-8"),
+            now=lambda: datetime(2026, 11, 4, 12, 0, tzinfo=UTC),
+        )
+
+    return factory
+
+
+@pytest.fixture
+def assistant(make_assistant) -> Assistant:
+    return make_assistant()

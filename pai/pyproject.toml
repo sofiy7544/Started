@@ -1,0 +1,47 @@
+[project]
+name = "pai"
+version = "0.1.0"
+description = "Персональный AI-ассистент в Telegram"
+requires-python = ">=3.12"
+dependencies = [
+    "aiogram>=3.20,<4",
+    "pydantic-ai-slim[openai,anthropic]>=2.66,<3",
+    "pydantic>=2.10,<3",
+    "pydantic-settings>=2.6,<3",
+    "sqlalchemy[asyncio]>=2.0,<3",
+    "aiosqlite>=0.20",
+    "alembic>=1.14,<2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=1.0", "ruff>=0.6"]
+# PostgreSQL на сервере (этап 9): pip install -e ".[postgres]"
+postgres = ["asyncpg>=0.30"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+pai = ["db/migrations/*.py", "db/migrations/versions/*.py", "db/alembic.ini"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+filterwarnings = ["ignore::DeprecationWarning:aiogram.*"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]
+"src/pai/bot/texts.py" = ["E501"]

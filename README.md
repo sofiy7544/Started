@@ -1,6 +1,7 @@
 # Telegram Userbot MCP для Claude Code
 
-> В этом репозитории также лежит отдельный проект — **Telegram-бот с виртуальным AI-персонажем**:
+> В этом репозитории также лежат: **персональный AI-ассистент в Telegram** — [pai/README.md](pai/README.md);
+> **бот с виртуальным AI-персонажем** —
 > см. [companion/README.md](companion/README.md).
 
 MCP-сервер на базе **Telethon**: Claude Code получает доступ к вашему личному аккаунту Telegram,

@@ -1,0 +1,51 @@
+# Каталог моделей. Добавить модель = добавить блок [[model]] и перезапустить бота.
+# provider: openai | anthropic | ollama. Модель видна в меню, только если задан ключ провайдера
+# (OPENAI_API_KEY, ANTHROPIC_API_KEY) или адрес OLLAMA_BASE_URL.
+# Цены берутся из пакета genai-prices; price_in/price_out (USD за 1M токенов) — ручная замена,
+# обязательна для моделей, которых нет в genai-prices (например, локальных: ставьте 0).
+
+default = "gpt-6-luna"
+
+[[model]]
+id = "gpt-6-luna"
+title = "GPT-6 Luna"
+note = "быстрая и дешёвая — для повседневных задач"
+provider = "openai"
+api_model = "openai-responses:gpt-6-luna"
+
+[[model]]
+id = "gpt-6.1-terra"
+title = "GPT-6.1 Terra"
+note = "баланс цены и качества"
+provider = "openai"
+api_model = "openai-responses:gpt-6.1-terra"
+
+[[model]]
+id = "gpt-6.1-sol"
+title = "GPT-6.1 Sol"
+note = "сильная — для сложных задач"
+provider = "openai"
+api_model = "openai-responses:gpt-6.1-sol"
+
+[[model]]
+id = "claude-haiku-5-5"
+title = "Claude Haiku 5.5"
+note = "быстрая и дешёвая"
+provider = "anthropic"
+api_model = "anthropic:claude-haiku-5-5"
+
+[[model]]
+id = "claude-sonnet-5-5"
+title = "Claude Sonnet 5.5"
+note = "сильная — тексты, анализ"
+provider = "anthropic"
+api_model = "anthropic:claude-sonnet-5-5"
+
+[[model]]
+id = "ollama-local"
+title = "Локальная (Ollama)"
+note = "бесплатно, на вашем компьютере"
+provider = "ollama"
+api_model = "ollama:qwen3:8b"
+price_in = 0
+price_out = 0
