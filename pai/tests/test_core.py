@@ -49,9 +49,12 @@ def test_catalog_availability_follows_keys() -> None:
     assert {m.provider for m in cat.available(only_openai)} == {"openai"}
     both = load_settings(**{**BASE, "anthropic_api_key": "a", "ollama_base_url": "http://localhost:11434/v1"})
     assert {m.provider for m in cat.available(both)} == {"openai", "anthropic", "ollama"}
-    # Недоступная или неизвестная модель → модель по умолчанию.
+    # Недоступная или неизвестная модель → первая доступная из цепочки default.
     assert cat.resolve("claude-sonnet-5-5", only_openai).id == "gpt-6-luna"
     assert cat.resolve("нет-такой", only_openai).id == "gpt-6-luna"
+    assert cat.resolve(None, both).id == "claude-opus-5-5"  # с ключом Claude — Claude по умолчанию
+    assert cat.memory_model(both).id == "claude-haiku-5-5"
+    assert cat.memory_model(only_openai).id == "gpt-6-luna"
 
 
 def test_catalog_validation(tmp_path: Path) -> None:
@@ -60,7 +63,7 @@ def test_catalog_validation(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="неизвестный провайдер"):
         load_catalog(bad)
     bad.write_text('default="y"\n[[model]]\nid="x"\nprovider="openai"\napi_model="openai:x"\n', encoding="utf-8")
-    with pytest.raises(ConfigError, match="по умолчанию"):
+    with pytest.raises(ConfigError, match="'default'"):
         load_catalog(bad)
     with pytest.raises(ConfigError, match="не найден"):
         load_catalog(tmp_path / "nope.toml")

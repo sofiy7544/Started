@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -21,6 +21,7 @@ from pai.config import Settings
 from pai.db.models import AuditEvent, Conversation, Turn, User
 from pai.llm.catalog import Catalog, ModelInfo
 from pai.llm.engine import ChatEngine, FailureKind, LLMFailure, load_history
+from pai.memory.engine import MemoryEngine
 from pai.services.budget import BudgetGuard
 from pai.services.limits import CircuitBreaker, RateLimiter
 
@@ -75,6 +76,7 @@ class Assistant:
         rate_limiter: RateLimiter,
         breaker: CircuitBreaker,
         base_instructions: str,
+        memory: MemoryEngine | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._sessions = sessions
@@ -86,6 +88,7 @@ class Assistant:
         self._breaker = breaker
         self._base_instructions = base_instructions.strip()
         self._now = now
+        self.memory = memory
         self._locks: dict[int, asyncio.Lock] = {}
 
     @property
@@ -154,6 +157,36 @@ class Assistant:
                 .values(closed_at=self._now())
             )
         await self.audit(user.tg_id, "conversation_reset")
+        if self.memory is not None:
+            self.memory.schedule(user.id, force=True)  # дообработать закрытый разговор
+
+    async def remember(self, user: User, text: str) -> bool:
+        """Явная просьба запомнить (/remember): достоверно и важно."""
+        if self.memory is None:
+            return False
+        saved = await self.memory.store.add(
+            user.id, "fact", text, confidence=1.0, importance=3, source="user"
+        )
+        await self.audit(user.tg_id, "memory_added_by_user")
+        return saved is not None
+
+    async def clear_memory(self, user: User) -> None:
+        if self.memory is None:
+            return
+        async with self.memory.lock(user.id):
+            await self.memory.store.clear(user.id)
+        await self.audit(user.tg_id, "memory_cleared")
+
+    async def wipe_user(self, user: User) -> None:
+        """Полное удаление личных данных: память, переписка, настройки, журнал действий.
+        Учёт расходов остаётся обезличенным (user_id = NULL)."""
+        lock = self.memory.lock(user.id) if self.memory else contextlib.nullcontext()
+        async with self._user_lock(user.id), lock, self._sessions() as s, s.begin():
+            if self.memory is not None:
+                await self.memory.store.clear(user.id)
+            await s.execute(delete(AuditEvent).where(AuditEvent.tg_id == user.tg_id))
+            await s.execute(delete(User).where(User.id == user.id))  # turns, conversations — каскадом
+        log.info("user data wiped: user=%s", user.id)
 
     async def audit(self, tg_id: int | None, kind: str, detail: str | None = None) -> None:
         async with self._sessions() as s, s.begin():
@@ -193,9 +226,11 @@ class Assistant:
         picked.reverse()
         return picked, chars
 
-    def _instructions(self, user: User) -> str:
+    def _instructions(self, user: User, memory_block: str = "") -> str:
         now = self._now().astimezone(ZoneInfo("Europe/Moscow"))
         parts = [self._base_instructions]
+        if memory_block:
+            parts.append(memory_block)
         style = REPLY_STYLES.get(user.reply_style, "")
         if style:
             parts.append(style)
@@ -219,7 +254,8 @@ class Assistant:
             if not self._breaker.allow():
                 return Answer(Outcome.UNAVAILABLE, texts.ERR_PAUSED)
             model = self.current_model(user)
-            instructions = self._instructions(user)
+            memory_block = await self.memory.context_block(user.id, text) if self.memory else ""
+            instructions = self._instructions(user, memory_block)
             async with self._sessions() as s, s.begin():
                 conv = await self._open_conversation(s, user)
                 blobs, history_chars = await self._history(s, conv)
@@ -260,7 +296,9 @@ class Assistant:
                     messages=reply.new_messages, model_id=model.id, input_tokens=reply.input_tokens,
                     output_tokens=reply.output_tokens, cost_usd=reply.cost_usd,
                 ))
-            return Answer(Outcome.OK, answer, model, reply.cost_usd)
+        if self.memory is not None:
+            self.memory.schedule(user.id)
+        return Answer(Outcome.OK, answer, model, reply.cost_usd)
 
     @contextlib.asynccontextmanager
     async def _user_lock(self, user_id: int) -> AsyncIterator[None]:

@@ -50,12 +50,21 @@ class Settings(BaseSettings):
     max_history_chars: int = Field(24000, ge=1000)
     max_user_message_chars: int = Field(8000, ge=100)
 
+    # --- память ---
+    memory_enabled: bool = True
+    memory_batch_turns: int = Field(3, ge=1, le=50)  # обрабатывать память каждые N обменов
+    memory_max_active: int = Field(300, ge=10)  # сверх лимита в архив уходят наименее ценные
+    memory_core_items: int = Field(20, ge=0, le=100)  # сколько главных воспоминаний всегда в контексте
+
     # --- надёжность ---
     llm_timeout_seconds: float = Field(90, gt=0)
     llm_max_retries: int = Field(2, ge=0, le=5)
     messages_per_minute: int = Field(20, ge=1)
     breaker_failure_threshold: int = Field(3, ge=1)
     breaker_cooldown_seconds: float = Field(60, gt=0)
+
+    backup_dir: Path = PROJECT_ROOT / "backups"
+    backup_keep: int = Field(14, ge=1)  # сколько последних копий хранить
 
     log_level: str = "INFO"
 

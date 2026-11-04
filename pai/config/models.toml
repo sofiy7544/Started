@@ -1,15 +1,54 @@
 # Каталог моделей. Добавить модель = добавить блок [[model]] и перезапустить бота.
 # provider: openai | anthropic | ollama. Модель видна в меню, только если задан ключ провайдера
-# (OPENAI_API_KEY, ANTHROPIC_API_KEY) или адрес OLLAMA_BASE_URL.
+# (OPENAI_API_KEY, ANTHROPIC_API_KEY) или адрес OLLAMA_BASE_URL, и провайдер подтвердил её при старте.
 # Цены берутся из пакета genai-prices; price_in/price_out (USD за 1M токенов) — ручная замена,
 # обязательна для моделей, которых нет в genai-prices (например, локальных: ставьте 0).
+# [model.settings] — параметры запроса для этой модели (передаются в pydantic-ai как есть).
 
-default = "gpt-6-luna"
+# Модель по умолчанию для чата и модель для фоновой работы с памятью:
+# берётся первая доступная из списка.
+default = ["claude-opus-5-5", "gpt-6-luna"]
+memory = ["claude-haiku-5-5", "gpt-6-luna"]
+
+[[model]]
+id = "claude-opus-5-5"
+title = "Claude Opus 5.5"
+note = "самая умная — сложные задачи, анализ, тексты"
+provider = "anthropic"
+api_model = "anthropic:claude-opus-5-5"
+[model.settings]
+anthropic_effort = "low"            # глубина размышлений: low | medium | high
+anthropic_cache_instructions = true  # кэш системных инструкций — дешевле повторные запросы
+# Если фильтр безопасности отклонит запрос, Anthropic сам повторит его на запасной модели.
+anthropic_betas = ["server-side-fallback-2026-07-01"]
+extra_body = { fallbacks = "default" }
+
+[[model]]
+id = "claude-sonnet-5-5"
+title = "Claude Sonnet 5.5"
+note = "быстрая и умная — баланс"
+provider = "anthropic"
+api_model = "anthropic:claude-sonnet-5-5"
+[model.settings]
+anthropic_effort = "low"
+anthropic_cache_instructions = true
+anthropic_betas = ["server-side-fallback-2026-07-01"]
+extra_body = { fallbacks = "default" }
+
+[[model]]
+id = "claude-haiku-5-5"
+title = "Claude Haiku 5.5"
+note = "самая быстрая и дешёвая"
+provider = "anthropic"
+api_model = "anthropic:claude-haiku-5-5"
+[model.settings]
+anthropic_effort = "low"
+anthropic_cache_instructions = true
 
 [[model]]
 id = "gpt-6-luna"
 title = "GPT-6 Luna"
-note = "быстрая и дешёвая — для повседневных задач"
+note = "быстрая и дешёвая"
 provider = "openai"
 api_model = "openai-responses:gpt-6-luna"
 
@@ -26,20 +65,6 @@ title = "GPT-6.1 Sol"
 note = "сильная — для сложных задач"
 provider = "openai"
 api_model = "openai-responses:gpt-6.1-sol"
-
-[[model]]
-id = "claude-haiku-5-5"
-title = "Claude Haiku 5.5"
-note = "быстрая и дешёвая"
-provider = "anthropic"
-api_model = "anthropic:claude-haiku-5-5"
-
-[[model]]
-id = "claude-sonnet-5-5"
-title = "Claude Sonnet 5.5"
-note = "сильная — тексты, анализ"
-provider = "anthropic"
-api_model = "anthropic:claude-sonnet-5-5"
 
 [[model]]
 id = "ollama-local"

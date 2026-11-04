@@ -246,3 +246,26 @@ async def test_concurrent_first_messages_create_one_user(assistant, sessions) ->
     assert len({u.id for u in users}) == 1
     async with sessions() as s:
         assert await s.scalar(select(func.count()).select_from(User)) == 1
+
+
+async def test_refusal_shows_clear_text_and_records_actual_cost(make_assistant, sessions) -> None:
+    """Ответ с finish_reason=content_filter (отказ Claude/OpenAI) — не показываем, расход учитываем."""
+    from pydantic_ai.messages import ModelResponse, TextPart
+    from pydantic_ai.models.function import FunctionModel
+    from pydantic_ai.usage import RequestUsage
+
+    from pai.llm.engine import PydanticAIEngine
+
+    async def refuse(messages, info):
+        return ModelResponse(parts=[TextPart("Частичный текст до отказа")], finish_reason="content_filter",
+                             usage=RequestUsage(input_tokens=1000, output_tokens=10))
+
+    a = make_assistant()
+    a._engine = PydanticAIEngine(a._settings, model_factory=lambda m: FunctionModel(refuse, model_name="gpt-6-luna"))
+    ans = await a.ask(await a.get_user(OWNER), "что-то")
+    assert ans.outcome is Outcome.FAILED and ans.text == texts.ERR_REFUSED
+    async with sessions() as s:
+        rec = await s.scalar(select(UsageRecord))
+        turns = await s.scalar(select(func.count()).select_from(Turn))
+    assert rec.confirmed and rec.cost_usd == Decimal("0.000105")  # 1000×$0.10 + 10×$0.50 за 1M
+    assert turns == 0

@@ -71,7 +71,7 @@ class FakeTelegram:
             except TimeoutError:
                 pass
             result = batch
-        elif method in ("sendMessage", "editMessageText"):
+        elif method in ("sendMessage", "editMessageText", "sendDocument"):
             self._next_message += 1
             result = {"message_id": self._next_message, "date": 1_700_000_000,
                       "chat": {"id": int(params["chat_id"]), "type": "private"},

@@ -6,7 +6,14 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 import pytest
-from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, UserPromptPart
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    TextPart,
+    ToolCallPart,
+    UserPromptPart,
+)
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.usage import RequestUsage
 
@@ -14,11 +21,14 @@ from pai.config import PROJECT_ROOT, Settings
 from pai.db import engine as db
 from pai.llm.catalog import load_catalog
 from pai.llm.engine import PydanticAIEngine
+from pai.memory.engine import MemoryEngine
+from pai.memory.store import MemoryStore
 from pai.services.assistant import Assistant
 from pai.services.budget import BudgetGuard
 from pai.services.limits import CircuitBreaker, RateLimiter
 
 os.environ.setdefault("PYDANTIC_AI_NO_BANNER", "1")
+NOW = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
 OWNER = 111
 STRANGER = 999
 
@@ -46,10 +56,20 @@ class Script:
 
     replies: list[str | Exception] = field(default_factory=list)
     seen: list[Seen] = field(default_factory=list)
+    # Запросы памяти (структурированный ответ) — отдельно, чтобы не смешивались с чатом.
+    memory_replies: list[dict | Exception] = field(default_factory=list)
+    memory_seen: list[Seen] = field(default_factory=list)
     input_tokens: int = 1000
     output_tokens: int = 100
 
     async def fn(self, messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        usage = RequestUsage(input_tokens=self.input_tokens, output_tokens=self.output_tokens)
+        if info.output_tools:
+            self.memory_seen.append(Seen("", list(messages), info.instructions))
+            item = self.memory_replies.pop(0) if self.memory_replies else {"episode_summary": "Поговорили."}
+            if isinstance(item, Exception):
+                raise item
+            return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, item)], usage=usage)
         self.seen.append(Seen(info.model_settings and "", list(messages), info.instructions))
         item = self.replies.pop(0) if self.replies else f"ответ {len(self.seen)}"
         if isinstance(item, Exception):
@@ -126,14 +146,17 @@ def make_assistant(sessions, settings, script, clock) -> AssistantFactory:
         engine = PydanticAIEngine(
             s, model_factory=lambda m: FunctionModel(sc.fn, model_name=m.provider_model_name)
         )
+        catalog = load_catalog(s.models_file)
+        budget = BudgetGuard(sess, monthly_limit_usd=s.monthly_budget_usd,
+                             disabled=s.paid_apis_disabled, attempts_per_call=s.llm_max_retries + 1)
+        memory = MemoryEngine(sessions=sess, settings=s, catalog=catalog, engine=engine, budget=budget,
+                              store=MemoryStore(sess, now=lambda: NOW)) if s.memory_enabled else None
         return Assistant(
-            sessions=sess, settings=s, catalog=load_catalog(s.models_file), engine=engine,
-            budget=BudgetGuard(sess, monthly_limit_usd=s.monthly_budget_usd,
-                               disabled=s.paid_apis_disabled, attempts_per_call=s.llm_max_retries + 1),
+            sessions=sess, settings=s, catalog=catalog, engine=engine, budget=budget, memory=memory,
             rate_limiter=RateLimiter(s.messages_per_minute, clock=clock),
             breaker=CircuitBreaker(s.breaker_failure_threshold, s.breaker_cooldown_seconds, clock=clock),
             base_instructions=(PROJECT_ROOT / "config" / "assistant.md").read_text(encoding="utf-8"),
-            now=lambda: datetime(2026, 11, 4, 12, 0, tzinfo=UTC),
+            now=lambda: NOW,
         )
 
     return factory

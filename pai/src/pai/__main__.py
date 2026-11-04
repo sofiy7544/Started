@@ -19,6 +19,8 @@ from pai.llm.catalog import load_catalog
 from pai.llm.checks import verify_catalog
 from pai.llm.engine import ChatEngine, PydanticAIEngine
 from pai.logging_setup import setup_logging
+from pai.memory.engine import MemoryEngine
+from pai.ops import backup, doctor
 from pai.services.assistant import Assistant
 from pai.services.budget import BudgetGuard
 from pai.services.limits import CircuitBreaker, RateLimiter
@@ -42,6 +44,8 @@ async def run(settings: Settings, *, engine: ChatEngine | None = None, verify: b
     session = (EnvAwareSession(api=TelegramAPIServer.from_base(settings.telegram_api_url))
                if settings.telegram_api_url else EnvAwareSession())
     bot = Bot(settings.bot_token.get_secret_value(), session=session)
+    memory: MemoryEngine | None = None
+    backups: asyncio.Task[None] | None = None
     try:
         try:
             me = await bot.get_me()
@@ -49,15 +53,22 @@ async def run(settings: Settings, *, engine: ChatEngine | None = None, verify: b
             raise ConfigError("Telegram отклонил BOT_TOKEN — проверьте токен у @BotFather") from exc
         if verify:
             catalog = await verify_catalog(catalog, settings)
+        chat_engine = engine or PydanticAIEngine(settings)
+        budget = BudgetGuard(sessions, monthly_limit_usd=settings.monthly_budget_usd,
+                             disabled=settings.paid_apis_disabled,
+                             attempts_per_call=settings.llm_max_retries + 1)
+        memory = (MemoryEngine(sessions=sessions, settings=settings, catalog=catalog,
+                               engine=chat_engine, budget=budget)
+                  if settings.memory_enabled else None)
         assistant = Assistant(
-            sessions=sessions, settings=settings, catalog=catalog,
-            engine=engine or PydanticAIEngine(settings),
-            budget=BudgetGuard(sessions, monthly_limit_usd=settings.monthly_budget_usd,
-                               disabled=settings.paid_apis_disabled,
-                               attempts_per_call=settings.llm_max_retries + 1),
+            sessions=sessions, settings=settings, catalog=catalog, engine=chat_engine, budget=budget,
+            memory=memory,
             rate_limiter=RateLimiter(settings.messages_per_minute),
             breaker=CircuitBreaker(settings.breaker_failure_threshold, settings.breaker_cooldown_seconds),
             base_instructions=instructions,
+        )
+        backups = asyncio.create_task(
+            backup.run_forever(settings.database_url, settings.backup_dir, settings.backup_keep)
         )
         dp = build_dispatcher(AppContext(settings, assistant, sessions))
         await set_commands(bot)
@@ -68,17 +79,32 @@ async def run(settings: Settings, *, engine: ChatEngine | None = None, verify: b
                  settings.monthly_budget_usd, await assistant.budget.spent_this_month())
         await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
     finally:
+        if backups is not None:
+            backups.cancel()
+        if memory is not None:
+            await memory.wait()  # не обрывать запись памяти при остановке
         await bot.session.close()
         await sql.dispose()
 
 
 def main() -> None:
+    command = sys.argv[1] if len(sys.argv) > 1 else "run"
+    if command == "doctor":
+        doctor.main()
+        return
+    if command not in ("run", "backup"):
+        print("Использование: python -m pai [run | doctor | backup]", file=sys.stderr)
+        sys.exit(2)
     try:
         settings = load_settings()
     except ConfigError as exc:
         print(f"Ошибка настройки: {exc}\nОткройте файл .env (образец — .env.example).", file=sys.stderr)
         sys.exit(2)
     setup_logging(settings.log_level)
+    if command == "backup":
+        path = backup.backup_sqlite(settings.database_url, settings.backup_dir, settings.backup_keep)
+        print(f"Резервная копия: {path}" if path else "Копия не нужна: база не SQLite или ещё не создана.")
+        return
     try:
         asyncio.run(run(settings))
     except ConfigError as exc:

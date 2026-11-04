@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import tomllib
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 from genai_prices import Usage as PriceUsage
 from genai_prices import calc_price
@@ -30,6 +31,7 @@ class ModelInfo:
     api_model: str
     price_in: Decimal | None = None  # ручная цена, USD за 1M входных токенов
     price_out: Decimal | None = None
+    settings: dict[str, Any] = field(default_factory=dict, hash=False, compare=False)
 
     @property
     def provider_model_name(self) -> str:
@@ -79,7 +81,8 @@ class ModelInfo:
 @dataclass(frozen=True)
 class Catalog:
     models: tuple[ModelInfo, ...]
-    default_id: str
+    default_ids: tuple[str, ...]
+    memory_ids: tuple[str, ...] = ()
 
     def get(self, model_id: str | None) -> ModelInfo | None:
         return next((m for m in self.models if m.id == model_id), None)
@@ -87,16 +90,21 @@ class Catalog:
     def available(self, settings: Settings) -> list[ModelInfo]:
         return [m for m in self.models if settings.provider_available(m.provider)]
 
+    def _first_available(self, ids: tuple[str, ...], settings: Settings) -> ModelInfo | None:
+        available = {m.id: m for m in self.available(settings)}
+        return next((available[i] for i in ids if i in available), None)
+
     def resolve(self, model_id: str | None, settings: Settings) -> ModelInfo:
-        """Выбранная модель, если она доступна; иначе модель по умолчанию; иначе первая доступная."""
+        """Выбранная модель, если доступна; иначе первая доступная из `default`; иначе любая."""
         available = self.available(settings)
         if not available:
             raise ConfigError("ни одна модель из каталога не доступна — проверьте ключи провайдеров")
-        for candidate in (model_id, self.default_id):
-            found = next((m for m in available if m.id == candidate), None)
-            if found:
-                return found
-        return available[0]
+        chosen = next((m for m in available if m.id == model_id), None)
+        return chosen or self._first_available(self.default_ids, settings) or available[0]
+
+    def memory_model(self, settings: Settings) -> ModelInfo:
+        """Модель для фоновой работы с памятью: дешёвая из списка `memory`, иначе модель по умолчанию."""
+        return self._first_available(self.memory_ids, settings) or self.resolve(None, settings)
 
 
 def load_catalog(path: Path) -> Catalog:
@@ -123,15 +131,25 @@ def load_catalog(path: Path) -> Catalog:
         seen.add(mid)
         price_in = raw.get("price_in")
         price_out = raw.get("price_out")
+        model_settings = raw.get("settings", {})
+        if not isinstance(model_settings, dict):
+            raise ConfigError(f"модель {mid}: settings должен быть таблицей [model.settings]")
         models.append(ModelInfo(
             id=mid, title=raw.get("title", mid), note=raw.get("note", ""), provider=provider,
             api_model=api_model,
             price_in=None if price_in is None else Decimal(str(price_in)),
             price_out=None if price_out is None else Decimal(str(price_out)),
+            settings=model_settings,
         ))
     if not models:
         raise ConfigError("в каталоге моделей нет ни одной модели")
-    default_id = data.get("default", models[0].id)
-    if default_id not in seen:
-        raise ConfigError(f"модель по умолчанию {default_id!r} не описана в каталоге")
-    return Catalog(tuple(models), default_id)
+
+    def id_list(key: str, fallback: list[str]) -> tuple[str, ...]:
+        value = data.get(key, fallback)
+        ids = [value] if isinstance(value, str) else list(value)
+        unknown = [i for i in ids if i not in seen]
+        if unknown:
+            raise ConfigError(f"модель {unknown[0]!r} из списка {key!r} не описана в каталоге")
+        return tuple(ids)
+
+    return Catalog(tuple(models), id_list("default", [models[0].id]), id_list("memory", []))

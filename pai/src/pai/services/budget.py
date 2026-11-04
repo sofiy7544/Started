@@ -44,7 +44,11 @@ class Reservation:
 
 class BudgetGuard:
     def __init__(
-        self, sessions: async_sessionmaker, *, monthly_limit_usd: float, disabled: bool = False,
+        self,
+        sessions: async_sessionmaker,
+        *,
+        monthly_limit_usd: float,
+        disabled: bool = False,
         attempts_per_call: int = 1,
     ) -> None:
         self._sessions = sessions
@@ -104,30 +108,60 @@ class BudgetGuard:
             self._reserved -= res.estimate
 
     async def _record(
-        self, res: Reservation, *, user_id: int | None, operation: str, cost: Decimal,
-        confirmed: bool, input_tokens: int = 0, output_tokens: int = 0, cache_read_tokens: int = 0,
+        self,
+        res: Reservation,
+        *,
+        user_id: int | None,
+        operation: str,
+        cost: Decimal,
+        confirmed: bool,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cache_read_tokens: int = 0,
     ) -> None:
         async with self._sessions() as s, s.begin():
-            s.add(UsageRecord(
-                user_id=user_id, provider=res.model.provider, model_id=res.model.id,
-                operation=operation, input_tokens=input_tokens, output_tokens=output_tokens,
-                cache_read_tokens=cache_read_tokens, cost_usd=cost, confirmed=confirmed,
-            ))
+            s.add(
+                UsageRecord(
+                    user_id=user_id,
+                    provider=res.model.provider,
+                    model_id=res.model.id,
+                    operation=operation,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    cache_read_tokens=cache_read_tokens,
+                    cost_usd=cost,
+                    confirmed=confirmed,
+                )
+            )
         log.info(
             "llm usage: op=%s user=%s model=%s in=%d out=%d cache_r=%d cost=%s confirmed=%s",
-            operation, user_id, res.model.id, input_tokens, output_tokens, cache_read_tokens,
-            cost, confirmed,
+            operation,
+            user_id,
+            res.model.id,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cost,
+            confirmed,
         )
 
     async def paid_call(
-        self, res: Reservation, call: Callable[[], Awaitable[Reply]], *, user_id: int | None,
+        self,
+        res: Reservation,
+        call: Callable[[], Awaitable[T]],
+        *,
+        user_id: int | None,
         operation: str,
-    ) -> Reply:
-        """Выполнить платный вызов под резервом и учесть его при любом исходе."""
+        response_of: Callable[[T], Reply] = lambda r: r,  # type: ignore[assignment,return-value]
+    ) -> T:
+        """Выполнить платный вызов под резервом и учесть его при любом исходе.
+        response_of достаёт Reply (usage, стоимость) из результата вызова."""
         try:
-            reply = await call()
+            result = await call()
         except LLMFailure as exc:
-            if exc.possibly_billed:
+            if exc.billed is not None:
+                await asyncio.shield(self._settle(res, exc.billed, user_id=user_id, operation=operation))
+            elif exc.possibly_billed:
                 await asyncio.shield(self._settle_unknown(res, user_id=user_id, operation=operation))
             else:
                 self.release(res)
@@ -138,14 +172,19 @@ class BudgetGuard:
         except BaseException:
             self.release(res)
             raise
-        await asyncio.shield(self._settle(res, reply, user_id=user_id, operation=operation))
-        return reply
+        await asyncio.shield(self._settle(res, response_of(result), user_id=user_id, operation=operation))
+        return result
 
     async def _settle(self, res: Reservation, reply: Reply, *, user_id: int | None, operation: str) -> None:
         try:
             await self._record(
-                res, user_id=user_id, operation=operation, cost=reply.cost_usd, confirmed=True,
-                input_tokens=reply.input_tokens, output_tokens=reply.output_tokens,
+                res,
+                user_id=user_id,
+                operation=operation,
+                cost=reply.cost_usd,
+                confirmed=True,
+                input_tokens=reply.input_tokens,
+                output_tokens=reply.output_tokens,
                 cache_read_tokens=reply.cache_read_tokens,
             )
         finally:
@@ -153,7 +192,8 @@ class BudgetGuard:
 
     async def _settle_unknown(self, res: Reservation, *, user_id: int | None, operation: str) -> None:
         try:
-            await self._record(res, user_id=user_id, operation=operation,
-                               cost=res.estimate * self._attempts, confirmed=False)
+            await self._record(
+                res, user_id=user_id, operation=operation, cost=res.estimate * self._attempts, confirmed=False
+            )
         finally:
             self.release(res)

@@ -72,8 +72,61 @@ class Turn(Base):
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
     cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), default=Decimal(0))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Обработан ли обмен памятью (извлечены факты и эпизод).
+    memory_processed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
-    __table_args__ = (Index("ix_turns_conversation", "conversation_id", "id"),)
+    __table_args__ = (
+        Index("ix_turns_conversation", "conversation_id", "id"),
+        Index("ix_turns_memory_pending", "user_id", "memory_processed"),
+    )
+
+
+MEMORY_KINDS = ("preference", "fact", "project", "agreement", "procedure")
+
+
+class Memory(Base):
+    """Долгосрочная память о владельце. kind:
+    preference — предпочтения и стиль; fact — устойчивые факты о жизни и работе;
+    project — проекты и их состояние; agreement — договорённости и обещания;
+    procedure — как владелец хочет, чтобы выполнялись привычные задачи."""
+
+    __tablename__ = "memories"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    confidence: Mapped[float] = mapped_column(default=0.8, nullable=False)  # 0..1
+    importance: Mapped[int] = mapped_column(Integer, default=2, nullable=False)  # 1..3
+    mentions: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="active", nullable=False)  # active|archived
+    superseded_by: Mapped[int | None] = mapped_column(ForeignKey("memories.id", ondelete="SET NULL"))
+    source: Mapped[str] = mapped_column(String(20), default="auto", nullable=False)  # auto|user
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (Index("ix_memories_user_status", "user_id", "status", "kind"),)
+
+
+class Episode(Base):
+    """Эпизодическая память: что обсуждали, какие решения приняли, что осталось открытым."""
+
+    __tablename__ = "episodes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    conversation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("conversations.id", ondelete="SET NULL")
+    )
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    decisions: Mapped[str | None] = mapped_column(Text)  # по одному на строку
+    open_items: Mapped[str | None] = mapped_column(Text)
+    first_turn_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    last_turn_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (Index("ix_episodes_user", "user_id", "id"),)
 
 
 class UsageRecord(Base):
