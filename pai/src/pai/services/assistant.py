@@ -7,7 +7,7 @@ import contextlib
 import enum
 import logging
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -22,6 +22,12 @@ from pai.config import Settings
 from pai.db.models import AuditEvent, Conversation, Turn, User
 from pai.llm.catalog import Catalog, ModelInfo
 from pai.llm.engine import ChatEngine, FailureKind, LLMFailure, load_history
+from pai.media.context import MEDIA_INSTRUCTIONS, PreparedMedia
+from pai.media.engine import MediaEngine
+from pai.media.ocr import OCR_INSTRUCTIONS
+from pai.media.outputs import GeneratedFile
+from pai.media.tools import FileEffects
+from pai.media.tools import build_toolset as build_media_toolset
 from pai.memory.engine import MemoryEngine
 from pai.reminders.schedule import WEEKDAYS_NOM, calendar_hint, zone
 from pai.reminders.service import ReminderService
@@ -68,6 +74,7 @@ class Answer:
     model: ModelInfo | None = None
     cost_usd: Decimal = Decimal(0)
     reminders: ReminderEffects | None = None  # что реально сделали инструменты напоминаний
+    files: list[GeneratedFile] = field(default_factory=list)  # файлы, созданные по просьбе владельца
 
 
 class Assistant:
@@ -84,6 +91,7 @@ class Assistant:
         base_instructions: str,
         memory: MemoryEngine | None = None,
         reminders: ReminderService | None = None,
+        media: MediaEngine | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._sessions = sessions
@@ -97,6 +105,7 @@ class Assistant:
         self._now = now
         self.memory = memory
         self.reminders = reminders
+        self.media = media
         self._locks: dict[int, asyncio.Lock] = {}
 
     @property
@@ -242,6 +251,8 @@ class Assistant:
         async with self._user_lock(user.id), lock, self._sessions() as s, s.begin():
             if self.memory is not None:
                 await self.memory.store.clear(user.id)
+            if self.media is not None:
+                await self.media.store.wipe_user(user.id)  # вложения и их файлы на диске
             await s.execute(delete(AuditEvent).where(AuditEvent.tg_id == user.tg_id))
             await s.execute(delete(User).where(User.id == user.id))  # turns, conversations — каскадом
         log.info("user data wiped: user=%s", user.id)
@@ -286,7 +297,7 @@ class Assistant:
         picked.reverse()
         return picked, chars
 
-    def _instructions(self, user: User, memory_block: str = "") -> str:
+    def _instructions(self, user: User, memory_block: str = "", manifest: str = "") -> str:
         tz = zone(user.timezone)
         now = self._now().astimezone(tz)
         parts = [self._base_instructions]
@@ -303,11 +314,15 @@ class Assistant:
         )
         if self.reminders is not None:
             parts.append(REMINDER_INSTRUCTIONS)
+        if manifest:
+            parts += [MEDIA_INSTRUCTIONS, OCR_INSTRUCTIONS, manifest]
         return "\n\n".join(parts)
 
-    async def ask(self, user: User, raw_text: str) -> Answer:
+    async def ask(self, user: User, raw_text: str, media: PreparedMedia | None = None) -> Answer:
+        """Ответ на сообщение. media — вложения этого сообщения (фото, документы, видео…),
+        уже обработанные MediaEngine."""
         text = raw_text.strip()
-        if not text:
+        if not text and media is None:
             return Answer(Outcome.FAILED, None)
         allowed, warn = self._limiter.check(user.id)
         if not allowed:
@@ -320,18 +335,41 @@ class Assistant:
             if not self._breaker.allow():
                 return Answer(Outcome.UNAVAILABLE, texts.ERR_PAUSED)
             model = self.current_model(user)
-            memory_block = await self.memory.context_block(user.id, text) if self.memory else ""
-            instructions = self._instructions(user, memory_block)
+            query = text or (media.history_note if media else "")
+            memory_block = await self.memory.context_block(user.id, query) if self.memory else ""
             async with self._sessions() as s, s.begin():
                 conv = await self._open_conversation(s, user)
                 blobs, history_chars = await self._history(s, conv)
                 conv_id = conv.id
             history = load_history(blobs)
 
+            manifest = ""
+            if self.media is not None:
+                current = set(media.attachment_ids) if media else set()
+                if media is not None:
+                    await self.media.store.link(user.id, media.attachment_ids, conv_id)
+                manifest = await self.media.context.manifest(user.id, conv_id, current)
+                needs_vision = (media is not None and media.needs_vision) or (
+                    bool(manifest) and await self.media.context.has_images(user.id, conv_id)
+                )
+                routed = self.media.router.for_answer(model, needs_vision=needs_vision)
+                if routed is None:
+                    if media is not None and media.needs_vision:
+                        return Answer(Outcome.FAILED, texts.NO_VISION_MODEL)
+                else:
+                    model = routed
+            instructions = self._instructions(user, memory_block, manifest)
+            prompt: str | list = text
+            if media is not None:
+                prompt = [text or texts.MEDIA_NO_COMMENT, *media.parts]
+            # С вложениями модель может сделать несколько шагов (открыть файл, прочитать часть):
+            # резерв — с запасом на повторную отправку контекста.
+            steps = 3 if manifest else 1
             reservation = await self._budget.reserve(
                 model,
-                input_chars=len(instructions) + history_chars + len(text),
-                max_output_tokens=self._settings.max_reply_tokens,
+                input_chars=(len(instructions) + history_chars + len(text)
+                             + (media.estimated_chars if media else 0)) * steps,
+                max_output_tokens=self._settings.max_reply_tokens * steps,
             )
             if reservation is None:
                 return Answer(
@@ -343,18 +381,22 @@ class Assistant:
                 max(reservation.estimate * 3, Decimal("0.0001")),
             )
             effects = ReminderEffects()
-            toolsets = [build_toolset(self.reminders, user, effects)] if self.reminders else None
+            file_effects = FileEffects()
+            toolsets = [build_toolset(self.reminders, user, effects)] if self.reminders else []
+            if manifest and self.media is not None:
+                toolsets.append(build_media_toolset(self.media, user.id, conv_id, file_effects))
             try:
                 reply = await self._budget.paid_call(
                     reservation,
                     lambda: self._engine.reply(
                         model,
-                        prompt=text,
+                        prompt=prompt,
                         history=history,
                         instructions=instructions,
                         max_tokens=self._settings.max_reply_tokens,
                         cost_limit_usd=cost_limit,
-                        toolsets=toolsets,
+                        toolsets=toolsets or None,
+                        request_limit=10 if manifest else 5,
                     ),
                     user_id=user.id,
                     operation="chat",
@@ -374,16 +416,20 @@ class Assistant:
                     _FAILURE_TEXTS[exc.kind],
                     model,
                     reminders=effects if effects.any else None,
+                    files=file_effects.files,
                 )
             self._breaker.success()
 
             answer = reply.text or texts.EMPTY_ANSWER
+            user_text = text
+            if media is not None and media.history_note:
+                user_text = f"{text}\n{media.history_note}".strip()
             async with self._sessions() as s, s.begin():
                 s.add(
                     Turn(
                         conversation_id=conv_id,
                         user_id=user.id,
-                        user_text=text,
+                        user_text=user_text,
                         assistant_text=answer,
                         messages=reply.new_messages,
                         model_id=model.id,
@@ -395,7 +441,8 @@ class Assistant:
                 )
         if self.memory is not None:
             self.memory.schedule(user.id)
-        return Answer(Outcome.OK, answer, model, reply.cost_usd, reminders=effects if effects.any else None)
+        return Answer(Outcome.OK, answer, model, reply.cost_usd, reminders=effects if effects.any else None,
+                      files=file_effects.files)
 
     @contextlib.asynccontextmanager
     async def _user_lock(self, user_id: int) -> AsyncIterator[None]:

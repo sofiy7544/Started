@@ -9,12 +9,17 @@ from aiogram.utils.chat_action import ChatActionSender
 
 from pai.bot import texts
 from pai.bot.app import AppContext
+from pai.bot.collector import Collector, Piece
 
 
-async def on_text(message: Message, bot: Bot, app: AppContext) -> None:
+async def on_text(message: Message, bot: Bot, app: AppContext, collector: Collector | None = None) -> None:
     from pai.bot.handlers.voice import send_answer
 
     u = message.from_user
+    if collector is not None and collector.pending(u.id):
+        # Текст сразу после файлов — задача к ним: «сравни», «что здесь не так».
+        collector.add(u.id, bot, message, Piece(text=message.text or ""), instruction=True)
+        return
     user = await app.assistant.get_user(u.id, u.first_name)
     async with ChatActionSender.typing(bot=bot, chat_id=message.chat.id):
         answer = await app.assistant.ask(user, message.text or "")

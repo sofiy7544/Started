@@ -31,6 +31,7 @@ class ModelInfo:
     api_model: str
     price_in: Decimal | None = None  # ручная цена, USD за 1M входных токенов
     price_out: Decimal | None = None
+    vision: bool = False  # принимает изображения (фото, скриншоты, страницы PDF, кадры видео)
     settings: dict[str, Any] = field(default_factory=dict, hash=False, compare=False)
 
     @property
@@ -83,6 +84,7 @@ class Catalog:
     models: tuple[ModelInfo, ...]
     default_ids: tuple[str, ...]
     memory_ids: tuple[str, ...] = ()
+    vision_ids: tuple[str, ...] = ()
 
     def get(self, model_id: str | None) -> ModelInfo | None:
         return next((m for m in self.models if m.id == model_id), None)
@@ -105,6 +107,14 @@ class Catalog:
     def memory_model(self, settings: Settings) -> ModelInfo:
         """Модель для фоновой работы с памятью: дешёвая из списка `memory`, иначе модель по умолчанию."""
         return self._first_available(self.memory_ids, settings) or self.resolve(None, settings)
+
+    def vision_model(self, settings: Settings) -> ModelInfo | None:
+        """Модель для изображений, если выбранная их не видит: первая доступная из `vision`,
+        иначе любая доступная с vision = true. None — ни одна доступная модель не видит картинки."""
+        chosen = self._first_available(self.vision_ids, settings)
+        if chosen is not None and chosen.vision:
+            return chosen
+        return next((m for m in self.available(settings) if m.vision), None)
 
 
 def load_catalog(path: Path) -> Catalog:
@@ -139,6 +149,7 @@ def load_catalog(path: Path) -> Catalog:
             api_model=api_model,
             price_in=None if price_in is None else Decimal(str(price_in)),
             price_out=None if price_out is None else Decimal(str(price_out)),
+            vision=bool(raw.get("vision", False)),
             settings=model_settings,
         ))
     if not models:
@@ -152,4 +163,5 @@ def load_catalog(path: Path) -> Catalog:
             raise ConfigError(f"модель {unknown[0]!r} из списка {key!r} не описана в каталоге")
         return tuple(ids)
 
-    return Catalog(tuple(models), id_list("default", [models[0].id]), id_list("memory", []))
+    return Catalog(tuple(models), id_list("default", [models[0].id]), id_list("memory", []),
+                   id_list("vision", []))

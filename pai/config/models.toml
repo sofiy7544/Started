@@ -9,6 +9,9 @@
 # берётся первая доступная из списка.
 default = ["claude-opus-5-5", "gpt-6-luna"]
 memory = ["claude-haiku-5-5", "gpt-6-luna"]
+# Модель для фото, скриншотов, сканов и кадров видео, если выбранная изображения не принимает
+# (например, локальная). vision = true у модели — она видит изображения.
+vision = ["claude-sonnet-5-5", "gpt-6-luna"]
 
 [[model]]
 id = "claude-opus-5-5"
@@ -16,6 +19,7 @@ title = "Claude Opus 5.5"
 note = "самая умная — сложные задачи, анализ, тексты"
 provider = "anthropic"
 api_model = "anthropic:claude-opus-5-5"
+vision = true
 [model.settings]
 anthropic_effort = "low"            # глубина размышлений: low | medium | high
 anthropic_cache_instructions = true  # кэш системных инструкций — дешевле повторные запросы
@@ -29,6 +33,7 @@ title = "Claude Sonnet 5.5"
 note = "быстрая и умная — баланс"
 provider = "anthropic"
 api_model = "anthropic:claude-sonnet-5-5"
+vision = true
 [model.settings]
 anthropic_effort = "low"
 anthropic_cache_instructions = true
@@ -41,6 +46,7 @@ title = "Claude Haiku 5.5"
 note = "самая быстрая и дешёвая"
 provider = "anthropic"
 api_model = "anthropic:claude-haiku-5-5"
+vision = true
 [model.settings]
 anthropic_effort = "low"
 anthropic_cache_instructions = true
@@ -51,6 +57,7 @@ title = "GPT-6 Luna"
 note = "быстрая и дешёвая"
 provider = "openai"
 api_model = "openai-responses:gpt-6-luna"
+vision = true
 
 [[model]]
 id = "gpt-6.1-terra"
@@ -58,6 +65,7 @@ title = "GPT-6.1 Terra"
 note = "баланс цены и качества"
 provider = "openai"
 api_model = "openai-responses:gpt-6.1-terra"
+vision = true
 
 [[model]]
 id = "gpt-6.1-sol"
@@ -65,6 +73,7 @@ title = "GPT-6.1 Sol"
 note = "сильная — для сложных задач"
 provider = "openai"
 api_model = "openai-responses:gpt-6.1-sol"
+vision = true
 
 [[model]]
 id = "ollama-local"

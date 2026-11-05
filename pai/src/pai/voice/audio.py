@@ -66,3 +66,66 @@ def decode_pcm_16k(data: bytes):  # type: ignore[no-untyped-def]
     for rf in resampler.resample(None):
         chunks.append(rf.to_ndarray().reshape(-1))
     return np.concatenate(chunks).astype(np.float32) if chunks else np.zeros(0, dtype=np.float32)
+
+
+def ogg_chunks(
+    src: bytes | str, *, chunk_seconds: float = 120.0, max_seconds: float | None = None
+) -> list[tuple[float, float, bytes]]:
+    """Звук (или звуковая дорожка видео) → части OGG/Opus по chunk_seconds: (начало, конец, данные).
+    Для длинных записей: каждая часть распознаётся отдельно — так видно, где что сказано, и
+    не упираемся в лимиты сервиса распознавания. Нет звука — пустой список."""
+    source = io.BytesIO(src) if isinstance(src, bytes) else src
+    chunks: list[tuple[float, float, bytes]] = []
+    with av.open(source) as container:
+        if not container.streams.audio:
+            return []
+        stream_in = container.streams.audio[0]
+        resampler = av.AudioResampler(format="s16", layout="mono", rate=48_000)
+        state: dict = {}
+
+        def open_chunk(start: float) -> None:
+            buf = io.BytesIO()
+            out = av.open(buf, "w", format="ogg")
+            st = out.add_stream("libopus", rate=48_000)
+            st.bit_rate = 32_000
+            st.layout = "mono"
+            state.update(buf=buf, out=out, stream=st, start=start, samples=0)
+
+        def close_chunk() -> None:
+            if not state:
+                return
+            for packet in state["stream"].encode(None):
+                state["out"].mux(packet)
+            state["out"].close()
+            seconds = state["samples"] / 48_000
+            if seconds > 0.3:
+                chunks.append((state["start"], state["start"] + seconds, state["buf"].getvalue()))
+            state.clear()
+
+        position = 0.0
+        open_chunk(0.0)
+
+        def feed(frames) -> bool:  # type: ignore[no-untyped-def]
+            nonlocal position
+            for rf in frames:
+                if max_seconds is not None and position >= max_seconds:
+                    return False
+                if state["samples"] / 48_000 >= chunk_seconds:
+                    close_chunk()
+                    open_chunk(position)
+                for packet in state["stream"].encode(rf):
+                    state["out"].mux(packet)
+                state["samples"] += rf.samples
+                position += rf.samples / 48_000
+            return True
+
+        try:
+            for frame in container.decode(stream_in):
+                if not feed(resampler.resample(frame)):
+                    break
+            else:
+                feed(resampler.resample(None))
+        except av.FFmpegError:
+            pass  # обрезанный/повреждённый хвост — используем то, что успели прочитать
+        close_chunk()
+    return chunks

@@ -89,7 +89,7 @@ async def test_menu_buttons_work_as_commands(harness, script) -> None:
     assert await send(lambda: tg.push_text(OWNER, texts.BTN_NEW)) == [texts.NEW_CONVERSATION]
     await send(lambda: tg.push_text(OWNER, "новая тема"))
     assert script.seen[-1].user_prompts == ["новая тема"]
-    assert "Что я умею сейчас" in (await send(lambda: tg.push_text(OWNER, texts.BTN_HELP)))[0]
+    assert "Что я умею" in (await send(lambda: tg.push_text(OWNER, texts.BTN_HELP)))[0]
     stats = (await send(lambda: tg.push_text(OWNER, texts.BTN_STATS)))[0]
     # 2 ответа в чате + 1 обработка памяти после «Новый диалог» (модель памяти — gpt-6-luna).
     assert "Этот месяц" in stats and "gpt-6-luna: 3" in stats and "оценкой" not in stats

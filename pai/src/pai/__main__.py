@@ -21,6 +21,9 @@ from pai.llm.catalog import load_catalog
 from pai.llm.checks import verify_catalog
 from pai.llm.engine import ChatEngine, PydanticAIEngine
 from pai.logging_setup import setup_logging
+from pai.media.engine import MediaEngine
+from pai.media.router import ModelRouter
+from pai.media.store import AttachmentStore
 from pai.memory.engine import MemoryEngine
 from pai.ops import backup, doctor
 from pai.proactive.service import ProactiveService
@@ -53,6 +56,7 @@ async def run(settings: Settings, *, engine: ChatEngine | None = None, verify: b
     memory: MemoryEngine | None = None
     backups: asyncio.Task[None] | None = None
     loops: list[asyncio.Task[None]] = []
+    dp = None
     try:
         try:
             me = await bot.get_me()
@@ -68,9 +72,17 @@ async def run(settings: Settings, *, engine: ChatEngine | None = None, verify: b
                                engine=chat_engine, budget=budget)
                   if settings.memory_enabled else None)
         reminder_service = ReminderService(sessions)
+        voice = build_voice(settings, budget)
+        media: MediaEngine | None = None
+        if settings.media_enabled:
+            store = AttachmentStore(sessions, settings.media_dir,
+                                    retention_hours=settings.media_retention_hours)
+            media = MediaEngine(settings=settings, store=store, router=ModelRouter(catalog, settings),
+                                voice=voice, engine=chat_engine, budget=budget)
+            loops.append(asyncio.create_task(store.run_forever()))  # удаление файлов после срока хранения
         assistant = Assistant(
             sessions=sessions, settings=settings, catalog=catalog, engine=chat_engine, budget=budget,
-            memory=memory, reminders=reminder_service,
+            memory=memory, reminders=reminder_service, media=media,
             rate_limiter=RateLimiter(settings.messages_per_minute),
             breaker=CircuitBreaker(settings.breaker_failure_threshold, settings.breaker_cooldown_seconds),
             base_instructions=instructions,
@@ -78,7 +90,6 @@ async def run(settings: Settings, *, engine: ChatEngine | None = None, verify: b
         backups = asyncio.create_task(
             backup.run_forever(settings.database_url, settings.backup_dir, settings.backup_keep)
         )
-        voice = build_voice(settings, budget)
         sender = TelegramSender(bot)
         # Два независимых цикла: доставка напоминаний (каждые 15 с) и инициатива (каждые 10 мин) —
         # долгая генерация инициативного сообщения не задерживает напоминание.
@@ -92,7 +103,7 @@ async def run(settings: Settings, *, engine: ChatEngine | None = None, verify: b
                 last_user_activity=assistant.last_user_activity,
             )
             loops.append(asyncio.create_task(proactive.run_forever(sender, assistant.record_outgoing)))
-        dp = build_dispatcher(AppContext(settings, assistant, sessions, voice))
+        dp = build_dispatcher(AppContext(settings, assistant, sessions, voice, media))
         await set_commands(bot)
         await bot.delete_webhook(drop_pending_updates=False)
         available = ", ".join(m.id for m in catalog.available(settings))
@@ -101,6 +112,8 @@ async def run(settings: Settings, *, engine: ChatEngine | None = None, verify: b
                  settings.monthly_budget_usd, await assistant.budget.spent_this_month())
         await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
     finally:
+        if dp is not None and dp.get("collector") is not None:
+            await dp["collector"].close()
         for loop_task in loops:
             loop_task.cancel()
         if backups is not None:

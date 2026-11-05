@@ -19,12 +19,14 @@ from aiogram.utils.chat_action import ChatActionSender
 
 from pai.bot import texts
 from pai.bot.app import AppContext, split_message
+from pai.bot.collector import Collector, Piece
 from pai.services.assistant import Answer, Outcome
 from pai.voice.engine import SPEEDS, VOICE_MODES, VoiceLimitError
 from pai.voice.providers import STYLE_INSTRUCTIONS, VoiceError
 
 log = logging.getLogger(__name__)
 TELEGRAM_DOWNLOAD_LIMIT = 20 * 1024 * 1024  # Bot API отдаёт ботам файлы до 20 МБ
+LONG_VOICE_SECONDS = 150  # длиннее — распознаём частями по 2 минуты
 CAPTION_LIMIT = 1024
 
 
@@ -43,6 +45,7 @@ async def send_answer(
 
     if not answer.text:
         await send_cards(message, answer)
+        await send_files(message, answer)
         return
     voice = app.voice
     if (
@@ -62,15 +65,79 @@ async def send_answer(
             await message.answer_voice(file, caption=answer.text if fits else None)
             if fits:
                 await send_cards(message, answer)
+                await send_files(message, answer)
                 return
             if spoken.truncated:
                 await message.answer(texts.TTS_TRUNCATED)
     for part in split_message(answer.text):
         await message.answer(part)
     await send_cards(message, answer)
+    await send_files(message, answer)
 
 
-async def on_voice(message: Message, bot: Bot, app: AppContext) -> None:
+async def send_files(message: Message, answer: Answer) -> None:
+    """Файлы, которые модель создала инструментом create_file (отчёт, таблица…)."""
+    for f in answer.files:
+        await message.answer_document(BufferedInputFile(f.data, filename=f.filename))
+
+
+async def _transcribe(message: Message, bot: Bot, app: AppContext, user) -> str | None:  # type: ignore[no-untyped-def]
+    """Голосовое → текст. Ошибки сообщает владельцу сам; None — текста нет.
+    Длинные записи (больше 2 минут) распознаются по частям."""
+    media = message.voice or message.audio or message.video_note
+    duration = float(getattr(media, "duration", 0) or 0)
+    limit = app.settings.max_voice_seconds
+    buf = io.BytesIO()
+    await bot.download(media, destination=buf)
+    ext = ".ogg" if message.voice else ".mp4" if message.video_note else ".mp3"
+    if duration <= 0 or duration > LONG_VOICE_SECONDS - 30:
+        # Длительность от Telegram бывает не указана — меряем сами (бесплатно, локально).
+        import asyncio
+
+        from pai.voice.audio import duration_seconds
+
+        try:
+            duration = max(duration, await asyncio.to_thread(duration_seconds, buf.getvalue()))
+        except Exception:  # noqa: BLE001 — не смогли измерить: распознаём целиком
+            pass
+        if duration > limit:
+            await message.answer(texts.VOICE_TOO_LONG.format(limit=limit))
+            return None
+    try:
+        if duration > LONG_VOICE_SECONDS:
+            text = await _transcribe_long(app, user.id, buf.getvalue())
+        else:
+            text = (await app.voice.transcribe(user.id, buf.getvalue(), f"voice{ext}", duration)).text
+    except VoiceLimitError as exc:
+        await message.answer(
+            texts.VOICE_BUDGET if "бюджет" in str(exc) else texts.VOICE_TOO_LONG.format(limit=limit)
+        )
+        return None
+    except VoiceError as exc:
+        log.warning("stt failed user=%s: %s", user.id, exc)
+        await message.answer(texts.VOICE_FAILED)
+        return None
+    if not text.strip():
+        await message.answer(texts.VOICE_NOT_HEARD)
+        return None
+    await message.reply(texts.heard(text))
+    return text
+
+
+async def _transcribe_long(app: AppContext, user_id: int, audio: bytes) -> str:
+    import asyncio
+
+    from pai.voice.audio import ogg_chunks
+
+    parts = await asyncio.to_thread(ogg_chunks, audio, chunk_seconds=120.0,
+                                    max_seconds=float(app.settings.max_voice_seconds))
+    out = []
+    for start, end, ogg in parts:
+        out.append((await app.voice.transcribe(user_id, ogg, "part.ogg", end - start)).text.strip())
+    return " ".join(t for t in out if t)
+
+
+async def on_voice(message: Message, bot: Bot, app: AppContext, collector: Collector | None = None) -> None:
     if app.voice is None:
         await message.answer(texts.VOICE_DISABLED)
         return
@@ -82,26 +149,19 @@ async def on_voice(message: Message, bot: Bot, app: AppContext) -> None:
     if duration > limit or (media.file_size or 0) > TELEGRAM_DOWNLOAD_LIMIT:
         await message.answer(texts.VOICE_TOO_LONG.format(limit=limit))
         return
+    if collector is not None and collector.pending(u.id):
+        # Голосовое после файлов — объяснение задачи к ним.
+        async def piece() -> Piece:
+            async with ChatActionSender.typing(bot=bot, chat_id=message.chat.id):
+                return Piece(text=await _transcribe(message, bot, app, user) or "")
+
+        collector.add(u.id, bot, message, piece(), instruction=True, voice=True)
+        return
     async with ChatActionSender.typing(bot=bot, chat_id=message.chat.id):
-        buf = io.BytesIO()
-        await bot.download(media, destination=buf)
-        ext = ".ogg" if message.voice else ".mp4" if message.video_note else ".mp3"
-        try:
-            transcript = await app.voice.transcribe(user.id, buf.getvalue(), f"voice{ext}", duration)
-        except VoiceLimitError as exc:
-            await message.answer(
-                texts.VOICE_BUDGET if "бюджет" in str(exc) else texts.VOICE_TOO_LONG.format(limit=limit)
-            )
+        text = await _transcribe(message, bot, app, user)
+        if text is None:
             return
-        except VoiceError as exc:
-            log.warning("stt failed user=%s: %s", user.id, exc)
-            await message.answer(texts.VOICE_FAILED)
-            return
-        if not transcript.text.strip():
-            await message.answer(texts.VOICE_NOT_HEARD)
-            return
-        await message.reply(texts.heard(transcript.text))
-        answer = await app.assistant.ask(user, transcript.text)
+        answer = await app.assistant.ask(user, text)
     await send_answer(message, bot, app, user, answer, incoming_voice=True)
 
 

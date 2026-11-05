@@ -8,6 +8,14 @@ from typing import Any
 from aiohttp import web
 
 
+class UploadedFile:
+    """Файл, который бот отправил (sendDocument и т. п.)."""
+
+    def __init__(self, filename: str, data: bytes) -> None:
+        self.filename = filename
+        self.data = data
+
+
 class FakeTelegram:
     """Минимальный Bot API: отдаёт апдейты из очереди и записывает исходящие вызовы."""
 
@@ -58,7 +66,15 @@ class FakeTelegram:
 
     async def _handle(self, request: web.Request) -> web.Response:
         method = request.match_info["method"]
-        params = dict(await request.post())
+        params: dict[str, Any] = {}
+        if request.content_type.startswith("multipart/"):
+            reader = await request.multipart()
+            async for part in reader:
+                body = await part.read()
+                params[part.name] = (UploadedFile(part.filename, body) if part.filename
+                                     else body.decode("utf-8"))
+        else:
+            params = dict(await request.post())
         if method != "getUpdates":
             self.calls.append((method, params))
         result: Any = True
@@ -80,7 +96,7 @@ class FakeTelegram:
             fid = params["file_id"]
             result = {"file_id": fid, "file_unique_id": fid, "file_size": len(self.files.get(fid, b"")),
                       "file_path": f"voice/{fid}.oga"}
-        elif method in ("sendMessage", "editMessageText", "sendDocument", "sendVoice"):
+        elif method in ("sendMessage", "editMessageText", "sendDocument", "sendVoice", "sendPhoto"):
             self._next_message += 1
             result = {"message_id": self._next_message, "date": 1_700_000_000,
                       "chat": {"id": int(params["chat_id"]), "type": "private"},
@@ -92,6 +108,31 @@ class FakeTelegram:
         if fid not in self.files:
             return web.Response(status=404)
         return web.Response(body=self.files[fid])
+
+    def push_file(self, user_id: int, kind: str, data: bytes, *, name: str | None = None, caption: str | None = None,
+                  size: int | None = None, duration: int = 5, media_group: str | None = None) -> int:
+        """Фото (kind=photo), документ, видео, аудио — как их присылает Telegram."""
+        fid = f"f{self._next_update}"
+        self.files[fid] = data
+        base = {"file_id": fid, "file_unique_id": fid, "file_size": len(data) if size is None else size}
+        if kind == "photo":
+            media: object = [{**base, "file_id": fid + "s", "file_unique_id": fid + "s", "width": 90, "height": 60},
+                             {**base, "width": 1280, "height": 960}]
+            self.files[fid + "s"] = data[:10]
+        elif kind == "document":
+            media = {**base, "file_name": name or "file.bin"}
+        elif kind == "video":
+            media = {**base, "width": 320, "height": 240, "duration": duration, **({"file_name": name} if name else {})}
+        elif kind == "audio":
+            media = {**base, "duration": duration, **({"file_name": name} if name else {})}
+        else:
+            raise ValueError(kind)
+        extra = {kind: media}
+        if caption:
+            extra["caption"] = caption
+        if media_group:
+            extra["media_group_id"] = media_group
+        return self.push_raw_message(user_id, extra)
 
     def push_voice(self, user_id: int, audio: bytes, duration: int = 3, kind: str = "voice") -> int:
         fid = f"f{self._next_update}"

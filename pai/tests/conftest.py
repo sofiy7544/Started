@@ -161,10 +161,10 @@ AssistantFactory = Callable[..., Assistant]
 
 
 @pytest.fixture
-def make_assistant(sessions, settings, script, clock) -> AssistantFactory:
+def make_assistant(sessions, settings, script, clock, tmp_path) -> AssistantFactory:
     def factory(*, settings_override: dict | None = None, script_override: Script | None = None,
-                sessions_override=None) -> Assistant:
-        s = settings.model_copy(update=settings_override or {})
+                sessions_override=None, media: bool = False, voice=None) -> Assistant:
+        s = settings.model_copy(update={"media_dir": tmp_path / "media", **(settings_override or {})})
         sc = script_override or script
         sess = sessions_override or sessions
         engine = PydanticAIEngine(
@@ -175,8 +175,20 @@ def make_assistant(sessions, settings, script, clock) -> AssistantFactory:
                              disabled=s.paid_apis_disabled, attempts_per_call=s.llm_max_retries + 1)
         memory = MemoryEngine(sessions=sess, settings=s, catalog=catalog, engine=engine, budget=budget,
                               store=MemoryStore(sess, now=lambda: NOW)) if s.memory_enabled else None
+        media_engine = None
+        if media:
+            from pai.media.engine import MediaEngine
+            from pai.media.router import ModelRouter
+            from pai.media.store import AttachmentStore
+
+            media_engine = MediaEngine(
+                settings=s, store=AttachmentStore(sess, s.media_dir, retention_hours=s.media_retention_hours,
+                                                  now=lambda: CLOCK.now),
+                router=ModelRouter(catalog, s), voice=voice, engine=engine, budget=budget,
+            )
         return Assistant(
             sessions=sess, settings=s, catalog=catalog, engine=engine, budget=budget, memory=memory,
+            media=media_engine,
             reminders=ReminderService(sess, now=lambda: CLOCK.now),
             rate_limiter=RateLimiter(s.messages_per_minute, clock=clock),
             breaker=CircuitBreaker(s.breaker_failure_threshold, s.breaker_cooldown_seconds, clock=clock),

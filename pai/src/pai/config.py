@@ -61,8 +61,22 @@ class Settings(BaseSettings):
     stt_provider: str = "auto"  # auto | openai | local
     tts_provider: str = "auto"  # auto | openai | edge | none
     stt_local_model: str = "small"  # faster-whisper: tiny | base | small | medium | large-v3
-    max_voice_seconds: int = Field(300, ge=5, le=3600)  # длиннее — не распознаём (расходы)
+    max_voice_seconds: int = Field(900, ge=5, le=3600)  # длиннее — не распознаём (расходы)
     max_tts_chars: int = Field(1500, ge=100, le=4000)  # ≈ 2 минуты речи; остальное — текстом
+
+    # --- вложения: фото, документы, аудио, видео ---
+    media_enabled: bool = True
+    media_dir: Path = PROJECT_ROOT / "data" / "media"
+    max_file_mb: int = Field(20, ge=1, le=2000)  # облачный Bot API отдаёт до 20 МБ
+    max_media_seconds: int = Field(1800, ge=10, le=14400)  # аудио/видео: распознаём не дольше
+    max_video_frames: int = Field(10, ge=3, le=30)
+    max_images_per_request: int = Field(12, ge=1, le=40)
+    max_ocr_pages: int = Field(6, ge=0, le=30)  # страниц-сканов PDF сразу в запрос
+    media_inline_chars: int = Field(30000, ge=2000, le=200000)  # текста вложений сразу в запрос
+    media_retention_hours: float = Field(24, gt=0)  # сколько хранить сами файлы
+    media_wait_seconds: float = Field(4.0, ge=0)  # ждать подпись/вопрос после файла
+    media_text_wait_seconds: float = Field(1.5, ge=0)  # ждать ещё файлы после вопроса
+    max_files_per_message: int = Field(20, ge=1, le=100)
 
     # --- надёжность ---
     llm_timeout_seconds: float = Field(90, gt=0)
@@ -106,6 +120,11 @@ class Settings(BaseSettings):
     @classmethod
     def _empty_to_none(cls, value: object) -> object:
         return None if isinstance(value, str) and not value.strip() else value
+
+    @property
+    def max_file_bytes(self) -> int:
+        limit = self.max_file_mb * 1024 * 1024
+        return limit if self.telegram_api_url else min(limit, 20 * 1024 * 1024)
 
     def provider_available(self, provider: str) -> bool:
         if provider == "openai":

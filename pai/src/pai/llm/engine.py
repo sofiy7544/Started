@@ -5,13 +5,14 @@ from __future__ import annotations
 import enum
 import logging
 import os
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Protocol, TypeVar
 
-from pydantic_ai import Agent, ModelMessage, ModelMessagesTypeAdapter, UsageLimits
+from pydantic_ai import Agent, BinaryContent, ModelMessage, ModelMessagesTypeAdapter, UsageLimits
 from pydantic_ai import exceptions as ai_exc
+from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai.models import Model
 from pydantic_ai.settings import ModelSettings
 
@@ -117,11 +118,13 @@ class ChatEngine(Protocol):
         self,
         model: ModelInfo,
         *,
-        prompt: str,
+        prompt: str | Sequence,
         history: list[ModelMessage],
         instructions: str,
         max_tokens: int,
         cost_limit_usd: Decimal,
+        toolsets: list | None = None,
+        request_limit: int = 5,
     ) -> Reply: ...
 
     async def structured(
@@ -167,7 +170,8 @@ class PydanticAIEngine:
             self._agents[key] = agent
         return agent
 
-    def _run_settings(self, model: ModelInfo, max_tokens: int, cost_limit_usd: Decimal):  # type: ignore[no-untyped-def]
+    def _run_settings(self, model: ModelInfo, max_tokens: int, cost_limit_usd: Decimal,
+                      request_limit: int = 5):  # type: ignore[no-untyped-def]
         # Настройки модели из каталога (effort, кэш, fallback…) + общие ограничения поверх.
         settings = ModelSettings(**model.settings)  # type: ignore[typeddict-item]
         settings.update(
@@ -178,21 +182,24 @@ class PydanticAIEngine:
         # cost_limit pydantic-ai работает только для моделей из справочника цен genai-prices;
         # для остальных (локальные, с ручной ценой) бюджет защищает наш резерв BudgetGuard.
         use_cost_limit = model.price_in is None and model.price_known()
-        limits = UsageLimits(request_limit=5, cost_limit=cost_limit_usd if use_cost_limit else None)
+        limits = UsageLimits(
+            request_limit=request_limit, cost_limit=cost_limit_usd if use_cost_limit else None
+        )
         return settings, limits
 
     async def _run(
         self,
         model: ModelInfo,
         output_type: type,
-        prompt: str,
+        prompt: str | Sequence,
         history: list[ModelMessage],
         instructions: str,
         max_tokens: int,
         cost_limit_usd: Decimal,
         toolsets: list | None = None,
+        request_limit: int = 5,
     ):  # type: ignore[no-untyped-def]
-        settings, limits = self._run_settings(model, max_tokens, cost_limit_usd)
+        settings, limits = self._run_settings(model, max_tokens, cost_limit_usd, request_limit)
         try:
             result = await self._agent(model, output_type).run(
                 prompt,
@@ -231,16 +238,18 @@ class PydanticAIEngine:
         self,
         model: ModelInfo,
         *,
-        prompt: str,
+        prompt: str | Sequence,
         history: list[ModelMessage],
         instructions: str,
         max_tokens: int,
         cost_limit_usd: Decimal,
         toolsets: list | None = None,
+        request_limit: int = 5,
     ) -> Reply:
-        """Ответ текстом. toolsets — инструменты на этот запрос (напоминания и т. п.)."""
+        """Ответ текстом. prompt — текст или текст с изображениями (BinaryContent);
+        toolsets — инструменты на этот запрос (напоминания, вложения)."""
         _result, reply = await self._run(
-            model, str, prompt, history, instructions, max_tokens, cost_limit_usd, toolsets
+            model, str, prompt, history, instructions, max_tokens, cost_limit_usd, toolsets, request_limit
         )
         return reply
 
@@ -260,13 +269,40 @@ def to_reply(model: ModelInfo, result) -> Reply:  # type: ignore[no-untyped-def]
         cost = model.cost_usd(input_tokens=u.input_tokens, output_tokens=u.output_tokens)
     return Reply(
         text=result.output.strip() if isinstance(result.output, str) else "",
-        new_messages=result.new_messages_json(),
+        new_messages=ModelMessagesTypeAdapter.dump_json(strip_binary(result.new_messages())),
         input_tokens=u.input_tokens,
         output_tokens=u.output_tokens,
         cache_read_tokens=u.cache_read_tokens,
         cost_usd=Decimal(str(cost)).quantize(Decimal("0.000001")),
         requests=u.requests,
     )
+
+
+def _placeholder(item: BinaryContent) -> str:
+    ident = item.identifier or ""
+    if ident.startswith("att-"):
+        number = ident[4:].split("-", 1)[0]
+        return f"[изображение из вложения #{number} — уже просмотрено; снова: view_attachment({number})]"
+    return "[изображение — в историю не сохраняется]"
+
+
+def strip_binary(messages: list[ModelMessage]) -> list[ModelMessage]:
+    """Картинки и файлы в истории заменяются пометками: история остаётся лёгкой, а следующий
+    вопрос не оплачивает повторную отправку всех изображений."""
+    out: list[ModelMessage] = []
+    for m in messages:
+        if isinstance(m, ModelRequest) and any(
+            isinstance(p, UserPromptPart) and not isinstance(p.content, str) for p in m.parts
+        ):
+            parts = []
+            for p in m.parts:
+                if isinstance(p, UserPromptPart) and not isinstance(p.content, str):
+                    items = [_placeholder(c) if isinstance(c, BinaryContent) else c for c in p.content]
+                    p = replace(p, content=items)
+                parts.append(p)
+            m = replace(m, parts=parts)
+        out.append(m)
+    return out
 
 
 def load_history(blobs: list[bytes]) -> list[ModelMessage]:

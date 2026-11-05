@@ -260,3 +260,52 @@ class ProcessedUpdate(Base):
 
     update_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Attachment(Base):
+    """Вложение (фото, документ, аудио, видео, файл из архива). Текст хранится частями в
+    attachment_chunks; сам файл — на диске (media_dir) только временно (file_expires_at)."""
+
+    __tablename__ = "attachments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    conversation_id: Mapped[int | None] = mapped_column(ForeignKey("conversations.id", ondelete="SET NULL"))
+    parent_id: Mapped[int | None] = mapped_column(ForeignKey("attachments.id", ondelete="CASCADE"))
+    kind: Mapped[str] = mapped_column(String(12), nullable=False)  # image|document|audio|video|archive
+    fmt: Mapped[str] = mapped_column(String(10), nullable=False)  # jpg, pdf, docx…
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(10), default="ok", nullable=False)  # ok|partial|failed
+    facts: Mapped[str] = mapped_column(Text, default="", nullable=False)  # «12 стр.; текст прочитан»
+    problems: Mapped[str] = mapped_column(Text, default="", nullable=False)  # что не удалось
+    meta: Mapped[str] = mapped_column(Text, default="{}", nullable=False)  # JSON: страницы, кадры…
+    stored_path: Mapped[str | None] = mapped_column(String(300))  # относительно media_dir
+    chunk_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    text_chars: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    file_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index("ix_attachments_conv", "conversation_id", "id"),
+        Index("ix_attachments_user", "user_id", "created_at"),
+    )
+
+
+class AttachmentChunk(Base):
+    """Часть текста вложения (страницы, лист, слайды, минута расшифровки). notes — краткий
+    конспект части дешёвой моделью (кэш: второй раз не платим)."""
+
+    __tablename__ = "attachment_chunks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    attachment_id: Mapped[int] = mapped_column(
+        ForeignKey("attachments.id", ondelete="CASCADE"), nullable=False
+    )
+    idx: Mapped[int] = mapped_column(Integer, nullable=False)  # с 1
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (UniqueConstraint("attachment_id", "idx", name="uq_chunk_idx"),)

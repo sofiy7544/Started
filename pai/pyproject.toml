@@ -13,10 +13,18 @@ dependencies = [
     "alembic>=1.14,<2",
     "av>=14",  # звук: длительность, перекодирование в OGG/Opus (FFmpeg внутри пакета)
     "tzdata>=2024.1",  # база часовых поясов: в Windows её нет, без неё zoneinfo не работает
+    # Вложения: изображения, PDF (движок Chrome), Word, Excel, PowerPoint, защита XML, кодировки
+    "pillow>=11",
+    "pypdfium2>=4.30",
+    "python-docx>=1.1",
+    "openpyxl>=3.1",
+    "python-pptx>=1.0",
+    "defusedxml>=0.7",
+    "charset-normalizer>=3.3",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio>=1.0", "ruff>=0.6"]
+dev = ["pytest>=8", "pytest-asyncio>=1.0", "ruff>=0.6", "numpy>=1.26"]  # numpy — тестовые аудио и видео
 # Бесплатный голос на вашем компьютере: uv sync --extra local-voice
 local-voice = ["faster-whisper>=1.2,<2", "edge-tts>=7.3,<8"]
 # PostgreSQL на сервере (этап 9): pip install -e ".[postgres]"
@@ -52,3 +60,5 @@ select = ["E", "F", "W", "B", "UP", "I"]
 # Длинные строки — текст инструкций для модели.
 "src/pai/reminders/tools.py" = ["E501"]
 "src/pai/proactive/service.py" = ["E501"]
+# Тексты для модели и владельца в модуле вложений.
+"src/pai/media/*" = ["E501"]

@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from pai.bot import texts
 from pai.config import Settings
 from pai.db.models import AuditEvent, ProcessedUpdate
+from pai.media.engine import MediaEngine
 from pai.services.assistant import Assistant
 from pai.voice.engine import VoiceEngine
 
@@ -47,6 +48,7 @@ class AppContext:
     assistant: Assistant
     sessions: async_sessionmaker
     voice: VoiceEngine | None = None
+    media: MediaEngine | None = None
 
 
 def _sender_id(update: Update) -> int | None:
@@ -155,15 +157,26 @@ def split_message(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list[str]:
 
 
 def build_dispatcher(app: AppContext) -> Dispatcher:
-    from pai.bot.handlers import chat, memory, menu, reminders, voice
+    from pai.bot.collector import Collector
+    from pai.bot.handlers import chat, media, memory, menu, reminders, voice
 
     dp = Dispatcher(storage=MemoryStorage(), app=app)
+    collector = None
+    if app.media is not None:
+        collector = Collector(
+            lambda batch: media.run_batch(app, batch),
+            media_wait=app.settings.media_wait_seconds,
+            text_wait=app.settings.media_text_wait_seconds,
+        )
+    dp["collector"] = collector
     # Сначала белый список: посторонние апдейты даже не попадают в журнал дедупликации.
     dp.update.outer_middleware(AccessMiddleware(set(app.settings.allowed_telegram_ids), app.sessions))
     dp.update.outer_middleware(DedupMiddleware(app.sessions))
     dp.errors.register(on_error)
     dp.include_router(menu.create_router())
     dp.include_router(memory.create_router())
+    if app.media is not None:
+        dp.include_router(media.create_router())
     dp.include_router(voice.create_router())
     dp.include_router(reminders.create_router())
     dp.include_router(chat.create_router())
