@@ -30,7 +30,13 @@ def _terms(query: str) -> list[str]:
     return [w[:6] if len(w) > 6 else w for w in words][:12]
 
 
-def build_toolset(media: MediaEngine, user_id: int, conversation_id: int, effects: FileEffects) -> FunctionToolset:
+FILES_INSTRUCTIONS = ("Если владелец просит файл (таблицу Excel, отчёт или план в Word, CSV, скрипт .bat/.ps1/.py) — "
+                      "создай его инструментом create_file. Не говори «файл готов», если инструмент не вызывался.")
+
+
+def build_toolset(media: MediaEngine, user_id: int, conversation_id: int, effects: FileEffects,
+                  *, attachments: bool = True) -> FunctionToolset:
+    """attachments=False — в разговоре нет вложений: только создание файлов."""
     store = media.store
 
     async def _own(attachment_id: int):  # type: ignore[no-untyped-def]
@@ -165,7 +171,8 @@ def build_toolset(media: MediaEngine, user_id: int, conversation_id: int, effect
         return ToolReturn(return_value=f"Кадры {mmss(start_seconds)}–{mmss(end_seconds)} видео #{v.id} — ниже.", content=parts)
 
     async def create_file(filename: str, content: str) -> str:
-        """Создать файл и отправить владельцу: .docx (отчёт), .xlsx (таблица), .csv, .json, .md, .txt.
+        """Создать файл и отправить владельцу: .docx (отчёт), .xlsx (таблица), .csv, .json, .md, .txt,
+        скрипты .bat / .ps1 / .py (по просьбе владельца; в ответе объясни, что делает скрипт и как запустить).
 
         Args:
             filename: имя файла с расширением, например «отчёт.docx» или «сравнение.xlsx»
@@ -182,5 +189,7 @@ def build_toolset(media: MediaEngine, user_id: int, conversation_id: int, effect
         effects.files.append(f)
         return f"Файл «{f.filename}» создан ({max(1, len(f.data) // 1024)} КБ) и будет отправлен владельцу после ответа."
 
+    if not attachments:
+        return FunctionToolset([create_file])
     return FunctionToolset([view_attachment, read_attachment, search_attachments, digest_document,
                             video_frames, create_file])

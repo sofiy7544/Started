@@ -18,7 +18,7 @@ from dataclasses import dataclass
 
 from pai.media.safety import extension, safe_name
 
-OUTPUT_FORMATS = ("txt", "md", "csv", "json", "xlsx", "docx")
+OUTPUT_FORMATS = ("txt", "md", "csv", "json", "xlsx", "docx", "bat", "ps1", "py")  # скрипты — по просьбе владельца
 MAX_OUTPUT_CHARS = 400_000
 SHEET_RE = re.compile(r"^#{2,3}\s*(?:Лист|Sheet)\s*:\s*(.+)$", re.IGNORECASE)
 
@@ -160,6 +160,14 @@ def build_file(filename: str, content: str) -> GeneratedFile:
         out = io.StringIO()
         csv.writer(out, delimiter=";").writerows(_rows(content))
         data = ("﻿" + out.getvalue()).encode("utf-8")  # BOM — Excel на Windows откроет кириллицу
+    elif fmt == "bat":
+        # Командный файл Windows: переводы строк CRLF, UTF-8 с переключением кодовой страницы.
+        body = content.replace("\r\n", "\n")
+        if "chcp 65001" not in body.lower():
+            body = "@chcp 65001 >nul\n" + body
+        data = body.replace("\n", "\r\n").encode("utf-8")
+    elif fmt == "ps1":
+        data = ("﻿" + content).encode("utf-8")  # BOM — Windows PowerShell 5 прочитает кириллицу
     else:
         data = content.encode("utf-8")
     return GeneratedFile(name, data)
