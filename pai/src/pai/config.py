@@ -56,6 +56,14 @@ class Settings(BaseSettings):
     memory_max_active: int = Field(300, ge=10)  # сверх лимита в архив уходят наименее ценные
     memory_core_items: int = Field(20, ge=0, le=100)  # сколько главных воспоминаний всегда в контексте
 
+    # --- голос ---
+    voice_enabled: bool = True
+    stt_provider: str = "auto"  # auto | openai | local
+    tts_provider: str = "auto"  # auto | openai | edge | none
+    stt_local_model: str = "small"  # faster-whisper: tiny | base | small | medium | large-v3
+    max_voice_seconds: int = Field(300, ge=5, le=3600)  # длиннее — не распознаём (расходы)
+    max_tts_chars: int = Field(1500, ge=100, le=4000)  # ≈ 2 минуты речи; остальное — текстом
+
     # --- надёжность ---
     llm_timeout_seconds: float = Field(90, gt=0)
     llm_max_retries: int = Field(2, ge=0, le=5)
@@ -83,6 +91,15 @@ class Settings(BaseSettings):
     def _not_empty(cls, value: list[int]) -> list[int]:
         if not value:
             raise ValueError("белый список пуст — бот был бы доступен всем")
+        return value
+
+    @field_validator("stt_provider", "tts_provider")
+    @classmethod
+    def _voice_provider(cls, value: str, info) -> str:  # type: ignore[no-untyped-def]
+        allowed = {"stt_provider": ("auto", "openai", "local"),
+                   "tts_provider": ("auto", "openai", "edge", "none")}[info.field_name]
+        if value not in allowed:
+            raise ValueError(f"допустимо: {', '.join(allowed)}")
         return value
 
     @field_validator("ollama_base_url", "telegram_api_url", mode="before")

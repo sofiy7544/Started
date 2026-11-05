@@ -13,12 +13,19 @@ config = context.config
 target_metadata = Base.metadata
 
 
+def _include_object(obj, name, type_, reflected, compare_to) -> bool:  # type: ignore[no-untyped-def]
+    """Таблицы полнотекстового поиска (memories_fts*, episodes_fts*) создаются миграцией 0002
+    вручную и не описаны в моделях — автогенерация не должна предлагать их удалить."""
+    return not (type_ == "table" and name and "_fts" in name)
+
+
 def _run(connection) -> None:  # type: ignore[no-untyped-def]
     context.configure(
         connection=connection,
         target_metadata=target_metadata,
         render_as_batch=True,  # ALTER TABLE в SQLite
         compare_type=True,
+        include_object=_include_object,
     )
     with context.begin_transaction():
         context.run_migrations()

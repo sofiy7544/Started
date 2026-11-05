@@ -70,8 +70,8 @@ async def test_start_shows_menu_keyboard(harness) -> None:
     assert "личный AI-ассистент" in out[0]
     keyboard = last_markup(tg)["keyboard"]
     labels = [b["text"] for row in keyboard for b in row]
-    assert labels == [texts.BTN_NEW, texts.BTN_MEMORY, texts.BTN_MODEL, texts.BTN_SETTINGS,
-                      texts.BTN_STATS, texts.BTN_HELP]
+    assert labels == [texts.BTN_NEW, texts.BTN_MEMORY, texts.BTN_MODEL, texts.BTN_VOICE,
+                      texts.BTN_SETTINGS, texts.BTN_STATS, texts.BTN_HELP]
 
 
 async def test_chat_with_typing_and_context(harness, script) -> None:
@@ -136,7 +136,7 @@ async def test_cancel_instructions_editing(harness, script) -> None:
 async def test_voice_files_and_unknown(harness, script) -> None:
     send, tg, *_ = harness
     voice = {"voice": {"file_id": "v", "file_unique_id": "u", "duration": 3}}
-    assert await send(lambda: tg.push_raw_message(OWNER, voice)) == [texts.NOT_YET_VOICE]
+    assert await send(lambda: tg.push_raw_message(OWNER, voice)) == [texts.VOICE_DISABLED]  # без движка голоса
     doc = {"document": {"file_id": "d", "file_unique_id": "u2", "file_name": "a.pdf"}}
     assert await send(lambda: tg.push_raw_message(OWNER, doc)) == [texts.NOT_YET_FILES]
     assert await send(lambda: tg.push_text(OWNER, "/abracadabra")) == [texts.UNKNOWN_COMMAND]

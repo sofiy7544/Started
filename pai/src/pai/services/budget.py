@@ -37,7 +37,8 @@ def month_start(now: datetime | None = None) -> datetime:
 
 @dataclass
 class Reservation:
-    model: ModelInfo
+    provider: str
+    model_id: str
     estimate: Decimal
     released: bool = False
 
@@ -93,6 +94,10 @@ class BudgetGuard:
     ) -> Reservation | None:
         """Резервирует верхнюю оценку стоимости. None — вызов делать нельзя."""
         estimate = self.estimate(model, input_chars=input_chars, max_output_tokens=max_output_tokens)
+        return await self.reserve_amount(model.provider, model.id, estimate)
+
+    async def reserve_amount(self, provider: str, model_id: str, estimate: Decimal) -> Reservation | None:
+        """Резерв для любого платного вызова (голос и т. п.) по готовой верхней оценке."""
         if self._disabled and estimate > 0:
             return None
         async with self._lock:
@@ -100,7 +105,20 @@ class BudgetGuard:
                 log.warning("budget: call blocked, monthly limit %s USD reached", self._limit)
                 return None
             self._reserved += estimate
-        return Reservation(model, estimate)
+        return Reservation(provider, model_id, estimate)
+
+    async def record_cost(
+        self, res: Reservation, *, cost: Decimal, exact: bool, user_id: int | None, operation: str
+    ) -> None:
+        """Записать расход вызова без токенов (голос) и снять резерв. exact=False — оценка."""
+        try:
+            await self._record(res, user_id=user_id, operation=operation, cost=cost, confirmed=exact)
+        finally:
+            self.release(res)
+
+    async def record_unknown(self, res: Reservation, *, user_id: int | None, operation: str) -> None:
+        """Исход неизвестен (таймаут, отмена) — записать верхнюю оценку."""
+        await self._settle_unknown(res, user_id=user_id, operation=operation)
 
     def release(self, res: Reservation) -> None:
         if not res.released:
@@ -123,8 +141,8 @@ class BudgetGuard:
             s.add(
                 UsageRecord(
                     user_id=user_id,
-                    provider=res.model.provider,
-                    model_id=res.model.id,
+                    provider=res.provider,
+                    model_id=res.model_id,
                     operation=operation,
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
@@ -137,7 +155,7 @@ class BudgetGuard:
             "llm usage: op=%s user=%s model=%s in=%d out=%d cache_r=%d cost=%s confirmed=%s",
             operation,
             user_id,
-            res.model.id,
+            res.model_id,
             input_tokens,
             output_tokens,
             cache_read_tokens,

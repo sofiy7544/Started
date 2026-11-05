@@ -137,6 +137,14 @@ class Assistant:
         await self.audit(user.tg_id, "style_changed", style)
         return True
 
+    async def set_voice(self, user: User, **values: object) -> None:
+        """Настройки голоса (значения проверяет обработчик по спискам движка)."""
+        allowed = {"voice_mode", "tts_voice", "tts_speed", "tts_style"}
+        values = {k: v for k, v in values.items() if k in allowed}
+        if values:
+            await self._update_user(user, **values)
+            await self.audit(user.tg_id, "voice_settings_changed", ",".join(sorted(values)))
+
     async def set_instructions(self, user: User, text: str | None) -> None:
         value = text.strip()[:2000] if text and text.strip() else None
         await self._update_user(user, instructions=value)

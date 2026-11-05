@@ -165,3 +165,29 @@ def make_assistant(sessions, settings, script, clock) -> AssistantFactory:
 @pytest.fixture
 def assistant(make_assistant) -> Assistant:
     return make_assistant()
+
+
+def make_audio(seconds: float = 2.0, fmt: str = "ogg") -> bytes:
+    """Синусоида заданной длины в mp3 или ogg/opus — тестовый «голос» без микрофона."""
+    import io
+
+    import av
+    import numpy as np
+
+    rate = 48_000 if fmt == "ogg" else 24_000
+    codec = "libopus" if fmt == "ogg" else "mp3"
+    buf = io.BytesIO()
+    with av.open(buf, "w", format=fmt) as c:
+        stream = c.add_stream(codec, rate=rate)
+        stream.layout = "mono"
+        t = np.arange(int(rate * seconds)) / rate
+        pcm = (np.sin(2 * np.pi * 440 * t) * 8000).astype(np.int16).reshape(1, -1)
+        frame_size = 960 if fmt == "ogg" else 1152
+        for i in range(0, pcm.shape[1], frame_size):
+            fr = av.AudioFrame.from_ndarray(np.ascontiguousarray(pcm[:, i:i + frame_size]), format="s16", layout="mono")
+            fr.sample_rate = rate
+            for p in stream.encode(fr):
+                c.mux(p)
+        for p in stream.encode(None):
+            c.mux(p)
+    return buf.getvalue()

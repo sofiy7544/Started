@@ -10,7 +10,8 @@ BTN_STATS = "📊 Статистика"
 BTN_SETTINGS = "⚙️ Настройки"
 BTN_HELP = "❓ Помощь"
 BTN_MEMORY = "🧠 Память"
-MENU_BUTTONS = (BTN_NEW, BTN_MEMORY, BTN_MODEL, BTN_SETTINGS, BTN_STATS, BTN_HELP)
+BTN_VOICE = "🎙 Голос"
+MENU_BUTTONS = (BTN_NEW, BTN_MEMORY, BTN_MODEL, BTN_VOICE, BTN_SETTINGS, BTN_STATS, BTN_HELP)
 
 STYLE_TITLES = {"short": "коротко", "normal": "обычно", "detailed": "подробно"}
 
@@ -39,13 +40,14 @@ HELP = (
     "• помнить текущий разговор и важное о вас надолго: предпочтения, факты, проекты, "
     "договорённости, как вы любите выполнять задачи, — «🧠 Память»;\n"
     "• находить, что мы обсуждали раньше и что решили;\n"
+    "• понимать голосовые сообщения (русский и украинский) и отвечать голосом — «🎙 Голос»;\n"
     "• работать на разных моделях — «🤖 Модель»;\n"
     "• следить за расходами — «📊 Статистика».\n\n"
     "Попросить запомнить: «запомни, что…» в разговоре или /remember текст.\n"
     "Попросить забыть: «забудь, что…» или удалить запись в «🧠 Память».\n\n"
-    "Скоро (следующие этапы): голосовые сообщения, анализ PDF/Word/Excel/фото, "
+    "Скоро (следующие этапы): анализ PDF/Word/Excel/фото, "
     "база знаний, поиск в интернете, календарь и почта — с подтверждением важных действий.\n\n"
-    "Команды: /new, /memory, /remember, /model, /stats, /settings, /menu."
+    "Команды: /new, /memory, /remember, /model, /voice, /stats, /settings, /menu."
 )
 
 ACCESS_DENIED = "🔒 Это личный бот. Доступ закрыт."
@@ -69,7 +71,6 @@ ERR_REFUSED = "Модель отказалась отвечать на этот 
 ERR_CONFIG = "⚙️ Ошибка настройки модели. Подробности — в логе бота."
 ERR_PAUSED = "⏸ После нескольких ошибок подряд я сделал паузу в обращениях к модели. Попробуйте через минуту."
 
-NOT_YET_VOICE = "🎙 Голосовые сообщения появятся на следующем этапе. Пока напишите текстом."
 NOT_YET_FILES = "📎 Анализ файлов и изображений появится на одном из следующих этапов. Пока опишите задачу текстом."
 NOT_YET_OTHER = "Пока я понимаю только текстовые сообщения."
 UNKNOWN_COMMAND = "Не знаю такой команды. Список — «❓ Помощь»."
@@ -111,7 +112,7 @@ def stats_text(stats, *, budget: Decimal, days_left: int) -> str:  # type: ignor
         f"Сегодня: {money(stats.today_cost)}",
     ]
     if stats.unconfirmed_cost > 0:
-        lines.append(f"Из них оценкой (ответ не дошёл): {money(stats.unconfirmed_cost)}")
+        lines.append(f"Из них по оценке (озвучка, прерванные запросы): {money(stats.unconfirmed_cost)}")
     if stats.by_model:
         lines += ["", "По моделям:"]
         lines += [f"• {m.model_id}: {m.requests} — {money(m.cost_usd)}" for m in stats.by_model]
@@ -144,3 +145,35 @@ WIPED = "Все ваши данные удалены. Чтобы начать з
 
 def memory_edit_prompt(current: str) -> str:
     return f"Сейчас записано: «{current}»\n\nНапишите исправленный вариант одним сообщением. Отмена — /cancel."
+
+VOICE_DISABLED = "🎙 Голос выключен в настройках (VOICE_ENABLED=0). Пока напишите текстом."
+VOICE_TOO_LONG = "Голосовое слишком длинное (больше {limit} с). Разбейте на части или напишите текстом."
+VOICE_NOT_HEARD = "Не расслышал — в сообщении нет речи или она неразборчива. Повторите, пожалуйста."
+VOICE_FAILED = "🎙 Не получилось распознать голосовое: сервис временно недоступен. Попробуйте ещё раз или напишите текстом."
+VOICE_BUDGET = "💸 Месячный лимит расходов исчерпан — голос сейчас недоступен."
+TTS_FAILED = "(Озвучить ответ не получилось — ниже текстом.)"
+TTS_TRUNCATED = "Озвучил начало ответа, полностью — текстом:"
+VOICE_SAMPLE_TEXT = "Привет! Так звучит мой голос. Скажи, если хочешь говорить быстрее, медленнее или в другой манере."
+VOICE_MODE_TITLES = {"auto": "голосом на голосовые", "always": "всегда голосом", "never": "только текстом"}
+STYLE_TITLES_VOICE = {"natural": "естественно", "calm": "спокойно", "friendly": "дружелюбно",
+                      "energetic": "энергично", "business": "по-деловому"}
+
+
+def heard(text: str) -> str:
+    short = text if len(text) <= 300 else text[:300].rstrip() + "…"
+    return f"🎙 «{short}»"
+
+
+def voice_settings_text(*, mode: str, voice_title: str, speed: float, style: str | None, stt: str,
+                        tts: str) -> str:
+    lines = [
+        "🎙 Голос", "",
+        f"Отвечать: {VOICE_MODE_TITLES.get(mode, mode)}",
+        f"Голос: {voice_title}",
+        f"Скорость: {speed:g}×",
+    ]
+    if style is not None:
+        lines.append(f"Манера: {STYLE_TITLES_VOICE.get(style, style)}")
+    lines += ["", f"Распознавание: {stt}", f"Синтез: {tts}",
+              "", "Отправьте голосовое — я пойму и отвечу. «🔊 Пример» — послушать выбранный голос."]
+    return "\n".join(lines)

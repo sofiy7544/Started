@@ -24,6 +24,7 @@ from pai.ops import backup, doctor
 from pai.services.assistant import Assistant
 from pai.services.budget import BudgetGuard
 from pai.services.limits import CircuitBreaker, RateLimiter
+from pai.voice.engine import build_voice
 
 log = logging.getLogger("pai")
 
@@ -70,7 +71,8 @@ async def run(settings: Settings, *, engine: ChatEngine | None = None, verify: b
         backups = asyncio.create_task(
             backup.run_forever(settings.database_url, settings.backup_dir, settings.backup_keep)
         )
-        dp = build_dispatcher(AppContext(settings, assistant, sessions))
+        voice = build_voice(settings, budget)
+        dp = build_dispatcher(AppContext(settings, assistant, sessions, voice))
         await set_commands(bot)
         await bot.delete_webhook(drop_pending_updates=False)
         available = ", ".join(m.id for m in catalog.available(settings))

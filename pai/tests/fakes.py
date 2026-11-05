@@ -16,6 +16,7 @@ class FakeTelegram:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self._next_update = 1
         self._next_message = 1000
+        self.files: dict[str, bytes] = {}  # file_id → содержимое (для getFile и скачивания)
         self.runner: web.AppRunner | None = None
         self.url = ""
 
@@ -71,16 +72,35 @@ class FakeTelegram:
             except TimeoutError:
                 pass
             result = batch
-        elif method in ("sendMessage", "editMessageText", "sendDocument"):
+        elif method == "getFile":
+            fid = params["file_id"]
+            result = {"file_id": fid, "file_unique_id": fid, "file_size": len(self.files.get(fid, b"")),
+                      "file_path": f"voice/{fid}.oga"}
+        elif method in ("sendMessage", "editMessageText", "sendDocument", "sendVoice"):
             self._next_message += 1
             result = {"message_id": self._next_message, "date": 1_700_000_000,
                       "chat": {"id": int(params["chat_id"]), "type": "private"},
                       "text": params.get("text", "")}
         return web.json_response({"ok": True, "result": result})
 
+    async def _download(self, request: web.Request) -> web.Response:
+        fid = request.match_info["path"].split("/")[-1].rsplit(".", 1)[0]
+        if fid not in self.files:
+            return web.Response(status=404)
+        return web.Response(body=self.files[fid])
+
+    def push_voice(self, user_id: int, audio: bytes, duration: int = 3, kind: str = "voice") -> int:
+        fid = f"f{self._next_update}"
+        self.files[fid] = audio
+        media = {"file_id": fid, "file_unique_id": fid, "duration": duration, "file_size": len(audio)}
+        if kind == "video_note":
+            media["length"] = 240
+        return self.push_raw_message(user_id, {kind: media})
+
     async def start(self) -> str:
         app = web.Application()
         app.router.add_post("/bot{token}/{method}", self._handle)
+        app.router.add_get("/file/bot{token}/{path:.*}", self._download)
         self.runner = web.AppRunner(app)
         await self.runner.setup()
         site = web.TCPSite(self.runner, "127.0.0.1", 0)

@@ -37,6 +37,12 @@ class User(Base):
     model_id: Mapped[str | None] = mapped_column(String(100))  # выбранная модель
     instructions: Mapped[str | None] = mapped_column(Text)  # личные инструкции
     reply_style: Mapped[str] = mapped_column(String(20), default="normal", nullable=False)
+    # Голос: auto — отвечать голосом на голосовые; always — всегда; never — только текстом.
+    voice_mode: Mapped[str] = mapped_column(String(10), default="auto", server_default="auto", nullable=False)
+    tts_voice: Mapped[str | None] = mapped_column(String(60))
+    tts_speed: Mapped[float] = mapped_column(default=1.0, server_default="1.0", nullable=False)
+    tts_style: Mapped[str] = mapped_column(String(20), default="natural", server_default="natural",
+                                           nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

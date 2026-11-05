@@ -18,6 +18,7 @@ from pai.bot import texts
 from pai.config import Settings
 from pai.db.models import AuditEvent, ProcessedUpdate
 from pai.services.assistant import Assistant
+from pai.voice.engine import VoiceEngine
 
 log = logging.getLogger(__name__)
 TELEGRAM_MESSAGE_LIMIT = 4096
@@ -28,6 +29,7 @@ COMMANDS = [
     BotCommand(command="memory", description="Память: что я о вас помню"),
     BotCommand(command="remember", description="Запомнить: /remember текст"),
     BotCommand(command="model", description="Выбрать модель"),
+    BotCommand(command="voice", description="Голос: режим, тембр, скорость"),
     BotCommand(command="stats", description="Статистика расходов"),
     BotCommand(command="settings", description="Настройки"),
     BotCommand(command="help", description="Помощь"),
@@ -39,6 +41,7 @@ class AppContext:
     settings: Settings
     assistant: Assistant
     sessions: async_sessionmaker
+    voice: VoiceEngine | None = None
 
 
 def _sender_id(update: Update) -> int | None:
@@ -147,7 +150,7 @@ def split_message(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list[str]:
 
 
 def build_dispatcher(app: AppContext) -> Dispatcher:
-    from pai.bot.handlers import chat, memory, menu
+    from pai.bot.handlers import chat, memory, menu, voice
 
     dp = Dispatcher(storage=MemoryStorage(), app=app)
     # Сначала белый список: посторонние апдейты даже не попадают в журнал дедупликации.
@@ -156,6 +159,7 @@ def build_dispatcher(app: AppContext) -> Dispatcher:
     dp.errors.register(on_error)
     dp.include_router(menu.create_router())
     dp.include_router(memory.create_router())
+    dp.include_router(voice.create_router())
     dp.include_router(chat.create_router())
     return dp
 
