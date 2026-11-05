@@ -16,7 +16,8 @@ class FakeTelegram:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self._next_update = 1
         self._next_message = 1000
-        self.files: dict[str, bytes] = {}  # file_id → содержимое (для getFile и скачивания)
+        self.files: dict[str, bytes] = {}
+        self.blocked_chats: set[int] = set()  # имитация «бот заблокирован пользователем»  # file_id → содержимое (для getFile и скачивания)
         self.runner: web.AppRunner | None = None
         self.url = ""
 
@@ -61,6 +62,9 @@ class FakeTelegram:
         if method != "getUpdates":
             self.calls.append((method, params))
         result: Any = True
+        if method == "sendMessage" and int(params.get("chat_id", 0)) in self.blocked_chats:
+            return web.json_response({"ok": False, "error_code": 403,
+                                      "description": "Forbidden: bot was blocked by the user"}, status=403)
         if method == "getMe":
             result = {"id": 42, "is_bot": True, "first_name": "Mira", "username": "mira_test_bot"}
         elif method == "getUpdates":

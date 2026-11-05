@@ -30,6 +30,11 @@ COMMANDS = [
     BotCommand(command="remember", description="Запомнить: /remember текст"),
     BotCommand(command="model", description="Выбрать модель"),
     BotCommand(command="voice", description="Голос: режим, тембр, скорость"),
+    BotCommand(command="reminders", description="Мои напоминания"),
+    BotCommand(command="add_reminder", description="Создать напоминание"),
+    BotCommand(command="delete_reminder", description="Удалить напоминание"),
+    BotCommand(command="proactive_on", description="Включить инициативные сообщения"),
+    BotCommand(command="proactive_off", description="Выключить инициативные сообщения"),
     BotCommand(command="stats", description="Статистика расходов"),
     BotCommand(command="settings", description="Настройки"),
     BotCommand(command="help", description="Помощь"),
@@ -150,7 +155,7 @@ def split_message(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list[str]:
 
 
 def build_dispatcher(app: AppContext) -> Dispatcher:
-    from pai.bot.handlers import chat, memory, menu, voice
+    from pai.bot.handlers import chat, memory, menu, reminders, voice
 
     dp = Dispatcher(storage=MemoryStorage(), app=app)
     # Сначала белый список: посторонние апдейты даже не попадают в журнал дедупликации.
@@ -160,6 +165,7 @@ def build_dispatcher(app: AppContext) -> Dispatcher:
     dp.include_router(menu.create_router())
     dp.include_router(memory.create_router())
     dp.include_router(voice.create_router())
+    dp.include_router(reminders.create_router())
     dp.include_router(chat.create_router())
     return dp
 

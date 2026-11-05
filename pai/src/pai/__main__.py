@@ -11,7 +11,9 @@ from aiogram.client.telegram import TelegramAPIServer
 from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
 from sqlalchemy.exc import SQLAlchemyError
 
+from pai.bot import texts
 from pai.bot.app import AppContext, build_dispatcher, set_commands
+from pai.bot.sender import TelegramSender
 from pai.bot.session import EnvAwareSession
 from pai.config import ConfigError, Settings, load_settings
 from pai.db import engine as db
@@ -21,6 +23,9 @@ from pai.llm.engine import ChatEngine, PydanticAIEngine
 from pai.logging_setup import setup_logging
 from pai.memory.engine import MemoryEngine
 from pai.ops import backup, doctor
+from pai.proactive.service import ProactiveService
+from pai.reminders.delivery import ReminderDelivery
+from pai.reminders.service import ReminderService
 from pai.services.assistant import Assistant
 from pai.services.budget import BudgetGuard
 from pai.services.limits import CircuitBreaker, RateLimiter
@@ -47,6 +52,7 @@ async def run(settings: Settings, *, engine: ChatEngine | None = None, verify: b
     bot = Bot(settings.bot_token.get_secret_value(), session=session)
     memory: MemoryEngine | None = None
     backups: asyncio.Task[None] | None = None
+    loops: list[asyncio.Task[None]] = []
     try:
         try:
             me = await bot.get_me()
@@ -61,9 +67,10 @@ async def run(settings: Settings, *, engine: ChatEngine | None = None, verify: b
         memory = (MemoryEngine(sessions=sessions, settings=settings, catalog=catalog,
                                engine=chat_engine, budget=budget)
                   if settings.memory_enabled else None)
+        reminder_service = ReminderService(sessions)
         assistant = Assistant(
             sessions=sessions, settings=settings, catalog=catalog, engine=chat_engine, budget=budget,
-            memory=memory,
+            memory=memory, reminders=reminder_service,
             rate_limiter=RateLimiter(settings.messages_per_minute),
             breaker=CircuitBreaker(settings.breaker_failure_threshold, settings.breaker_cooldown_seconds),
             base_instructions=instructions,
@@ -72,6 +79,19 @@ async def run(settings: Settings, *, engine: ChatEngine | None = None, verify: b
             backup.run_forever(settings.database_url, settings.backup_dir, settings.backup_keep)
         )
         voice = build_voice(settings, budget)
+        sender = TelegramSender(bot)
+        # Два независимых цикла: доставка напоминаний (каждые 15 с) и инициатива (каждые 10 мин) —
+        # долгая генерация инициативного сообщения не задерживает напоминание.
+        delivery = ReminderDelivery(service=reminder_service, sessions=sessions, sender=sender,
+                                    on_sent=assistant.record_outgoing, late_note=texts.REMINDER_LATE)
+        loops.append(asyncio.create_task(delivery.run_forever()))
+        if memory is not None:
+            proactive = ProactiveService(
+                sessions=sessions, settings=settings, catalog=catalog, engine=chat_engine, budget=budget,
+                memory=memory.store, reminders=reminder_service,
+                last_user_activity=assistant.last_user_activity,
+            )
+            loops.append(asyncio.create_task(proactive.run_forever(sender, assistant.record_outgoing)))
         dp = build_dispatcher(AppContext(settings, assistant, sessions, voice))
         await set_commands(bot)
         await bot.delete_webhook(drop_pending_updates=False)
@@ -81,6 +101,8 @@ async def run(settings: Settings, *, engine: ChatEngine | None = None, verify: b
                  settings.monthly_budget_usd, await assistant.budget.spent_this_month())
         await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
     finally:
+        for loop_task in loops:
+            loop_task.cancel()
         if backups is not None:
             backups.cancel()
         if memory is not None:

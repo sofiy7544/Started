@@ -41,13 +41,16 @@ HELP = (
     "договорённости, как вы любите выполнять задачи, — «🧠 Память»;\n"
     "• находить, что мы обсуждали раньше и что решили;\n"
     "• понимать голосовые сообщения (русский и украинский) и отвечать голосом — «🎙 Голос»;\n"
+    "• напоминать: «напомни завтра в 10 позвонить врачу», «каждый понедельник в 9 — отчёты» — «⏰ Напоминания»;\n"
+    "• иногда писать первым по вашим делам — /proactive_on (настройки — «⚙️ Настройки»);\n"
     "• работать на разных моделях — «🤖 Модель»;\n"
     "• следить за расходами — «📊 Статистика».\n\n"
     "Попросить запомнить: «запомни, что…» в разговоре или /remember текст.\n"
     "Попросить забыть: «забудь, что…» или удалить запись в «🧠 Память».\n\n"
     "Скоро (следующие этапы): анализ PDF/Word/Excel/фото, "
     "база знаний, поиск в интернете, календарь и почта — с подтверждением важных действий.\n\n"
-    "Команды: /new, /memory, /remember, /model, /voice, /stats, /settings, /menu."
+    "Команды: /new, /memory, /remember, /reminders, /add_reminder, /delete_reminder, /proactive_on, "
+    "/proactive_off, /timezone, /model, /voice, /stats, /settings, /menu."
 )
 
 ACCESS_DENIED = "🔒 Это личный бот. Доступ закрыт."
@@ -177,3 +180,33 @@ def voice_settings_text(*, mode: str, voice_title: str, speed: float, style: str
     lines += ["", f"Распознавание: {stt}", f"Синтез: {tts}",
               "", "Отправьте голосовое — я пойму и отвечу. «🔊 Пример» — послушать выбранный голос."]
     return "\n".join(lines)
+
+BTN_REMINDERS = "⏰ Напоминания"
+REMINDERS_EMPTY = "Активных напоминаний нет. Просто напишите или скажите: «напомни завтра в 10 позвонить врачу»."
+REMINDERS_HEADER = "⏰ Ваши напоминания:"
+ADD_REMINDER_PROMPT = "О чём и когда напомнить? Например: «завтра в 10:00 позвонить врачу» или «каждый понедельник в 9 проверить отчёты». Отмена — /cancel."
+EDIT_REMINDER_PROMPT = "Что изменить в напоминании #{id}? Напишите новое время и/или текст. Отмена — /cancel."
+REMINDER_DELETED = "🗑 Напоминание #{id} удалено."
+REMINDER_NOT_FOUND = "Такого активного напоминания нет."
+REMINDER_DONE = "✅ Отметил."
+REMINDER_LATE = "(отправлено с опозданием — бот был выключен)"
+REMINDER_SNOOZED = "⏰ Напомню {when}."
+PROACTIVE_ON = "🔔 Инициативные сообщения включены ({freq}). Буду иногда писать первым — только по вашим делам и не в тихие часы ({quiet}). Выключить — /proactive_off."
+PROACTIVE_OFF = "🔕 Инициативные сообщения выключены. Напоминания продолжат приходить. Включить — /proactive_on."
+TIMEZONE_USAGE = "Укажите часовой пояс, например: /timezone Europe/Kyiv"
+TIMEZONE_SET = "🌍 Часовой пояс: {tz}. Сейчас у вас {now}."
+TIMEZONE_BAD = "Не знаю такого часового пояса. Примеры: Europe/Kyiv, Europe/Warsaw, Europe/Berlin, America/New_York."
+
+
+def reminder_card(kind: str, view) -> str:  # type: ignore[no-untyped-def]
+    rep = f" ({view.repeat})" if view.repeat else ""
+    icon = {"created": "✅ Напоминание", "updated": "✏️ Изменено напоминание", "deleted": "🗑 Удалено напоминание"}[kind]
+    return f"{icon} #{view.id} — {view.when}{rep}:\n{view.text}"
+
+
+def minutes_to_hhmm(value: int) -> str:
+    return f"{value // 60:02d}:{value % 60:02d}"
+
+
+def quiet_text(start: int, end: int) -> str:
+    return "выключены" if start == end else f"{minutes_to_hhmm(start)}–{minutes_to_hhmm(end)}"

@@ -16,7 +16,9 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
 )
+from sqlalchemy import false as sa_false
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -41,8 +43,26 @@ class User(Base):
     voice_mode: Mapped[str] = mapped_column(String(10), default="auto", server_default="auto", nullable=False)
     tts_voice: Mapped[str | None] = mapped_column(String(60))
     tts_speed: Mapped[float] = mapped_column(default=1.0, server_default="1.0", nullable=False)
-    tts_style: Mapped[str] = mapped_column(String(20), default="natural", server_default="natural",
-                                           nullable=False)
+    tts_style: Mapped[str] = mapped_column(
+        String(20), default="natural", server_default="natural", nullable=False
+    )
+    # Часовой пояс владельца: время напоминаний и тихие часы считаются в нём.
+    timezone: Mapped[str] = mapped_column(
+        String(50), default="Europe/Kyiv", server_default="Europe/Kyiv", nullable=False
+    )
+    # Инициативные сообщения: выключены, пока владелец не включит (/proactive_on).
+    proactive_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=sa_false(), nullable=False
+    )
+    proactive_frequency: Mapped[str] = mapped_column(
+        String(10), default="normal", server_default="normal", nullable=False
+    )  # rare | normal | often
+    quiet_start: Mapped[int] = mapped_column(
+        Integer, default=22 * 60, server_default=str(22 * 60), nullable=False
+    )  # минуты от полуночи, местное время
+    quiet_end: Mapped[int] = mapped_column(
+        Integer, default=9 * 60, server_default=str(9 * 60), nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -122,9 +142,7 @@ class Episode(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    conversation_id: Mapped[int | None] = mapped_column(
-        ForeignKey("conversations.id", ondelete="SET NULL")
-    )
+    conversation_id: Mapped[int | None] = mapped_column(ForeignKey("conversations.id", ondelete="SET NULL"))
     summary: Mapped[str] = mapped_column(Text, nullable=False)
     decisions: Mapped[str | None] = mapped_column(Text)  # по одному на строку
     open_items: Mapped[str | None] = mapped_column(Text)
@@ -133,6 +151,71 @@ class Episode(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     __table_args__ = (Index("ix_episodes_user", "user_id", "id"),)
+
+
+REPEAT_KINDS = ("none", "daily", "weekdays", "weekly", "monthly")
+
+
+class Reminder(Base):
+    """Напоминание. next_run_at — следующий момент отправки (UTC); повторы считаются в часовом
+    поясе напоминания, чтобы «каждый понедельник в 9:00» не сдвигался при переходе на летнее время."""
+
+    __tablename__ = "reminders"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    next_run_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    local_time: Mapped[str] = mapped_column(String(5), nullable=False)  # ЧЧ:ММ — для повторов
+    repeat: Mapped[str] = mapped_column(String(10), default="none", nullable=False)
+    # Для ежемесячных: исходное число месяца (31-е в феврале → 28-е, но в марте снова 31-е).
+    anchor_day: Mapped[int | None] = mapped_column(Integer)
+    timezone: Mapped[str] = mapped_column(String(50), nullable=False)
+    status: Mapped[str] = mapped_column(String(10), default="active", nullable=False)  # active|done|cancelled
+    sent_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        Index("ix_reminders_due", "status", "next_run_at"),
+        Index("ix_reminders_user", "user_id"),
+    )
+
+
+class ReminderDelivery(Base):
+    """Журнал отправок. UNIQUE(reminder_id, scheduled_for) — одно и то же срабатывание не уйдёт дважды."""
+
+    __tablename__ = "reminder_deliveries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    reminder_id: Mapped[int] = mapped_column(ForeignKey("reminders.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    scheduled_for: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(10), default="sending", nullable=False)  # sending|sent|failed
+    attempts: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    tg_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    error: Mapped[str | None] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (UniqueConstraint("reminder_id", "scheduled_for", name="uq_delivery_once"),)
+
+
+class ProactiveMessage(Base):
+    """Журнал инициативных сообщений: что, когда, о чём (topic) и ответил ли владелец."""
+
+    __tablename__ = "proactive_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    topic: Mapped[str] = mapped_column(String(200), nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(10), default="sending", nullable=False)  # sending|sent|failed
+    tg_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (Index("ix_proactive_user", "user_id", "created_at"),)
 
 
 class UsageRecord(Base):

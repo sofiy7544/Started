@@ -12,6 +12,7 @@ dependencies = [
     "aiosqlite>=0.20",
     "alembic>=1.14,<2",
     "av>=14",  # звук: длительность, перекодирование в OGG/Opus (FFmpeg внутри пакета)
+    "tzdata>=2024.1",  # база часовых поясов: в Windows её нет, без неё zoneinfo не работает
 ]
 
 [project.optional-dependencies]
@@ -48,3 +49,6 @@ select = ["E", "F", "W", "B", "UP", "I"]
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["E501"]
 "src/pai/bot/texts.py" = ["E501"]
+# Длинные строки — текст инструкций для модели.
+"src/pai/reminders/tools.py" = ["E501"]
+"src/pai/proactive/service.py" = ["E501"]

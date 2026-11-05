@@ -23,12 +23,28 @@ from pai.llm.catalog import load_catalog
 from pai.llm.engine import PydanticAIEngine
 from pai.memory.engine import MemoryEngine
 from pai.memory.store import MemoryStore
+from pai.reminders.service import ReminderService
 from pai.services.assistant import Assistant
 from pai.services.budget import BudgetGuard
 from pai.services.limits import CircuitBreaker, RateLimiter
 
 os.environ.setdefault("PYDANTIC_AI_NO_BANNER", "1")
 NOW = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
+
+
+class WallClock:
+    """Управляемое «текущее время» для напоминаний и инициативы в тестах."""
+
+    def __init__(self) -> None:
+        self.now = NOW
+
+    def advance(self, **kw) -> None:  # type: ignore[no-untyped-def]
+        from datetime import timedelta
+
+        self.now += timedelta(**kw)
+
+
+CLOCK = WallClock()
 OWNER = 111
 STRANGER = 999
 
@@ -74,6 +90,8 @@ class Script:
         item = self.replies.pop(0) if self.replies else f"ответ {len(self.seen)}"
         if isinstance(item, Exception):
             raise item
+        if isinstance(item, dict) and "tool" in item:  # модель вызывает инструмент
+            return ModelResponse(parts=[ToolCallPart(item["tool"], item.get("args", {}))], usage=usage)
         return ModelResponse(parts=[TextPart(item)],
                              usage=RequestUsage(input_tokens=self.input_tokens, output_tokens=self.output_tokens))
 
@@ -89,6 +107,12 @@ def _isolated_environment():
     yield
     os.environ.clear()
     os.environ.update(saved)
+
+
+@pytest.fixture(autouse=True)
+def _reset_clock():
+    CLOCK.now = NOW
+    yield
 
 
 @pytest.fixture
@@ -153,10 +177,11 @@ def make_assistant(sessions, settings, script, clock) -> AssistantFactory:
                               store=MemoryStore(sess, now=lambda: NOW)) if s.memory_enabled else None
         return Assistant(
             sessions=sess, settings=s, catalog=catalog, engine=engine, budget=budget, memory=memory,
+            reminders=ReminderService(sess, now=lambda: CLOCK.now),
             rate_limiter=RateLimiter(s.messages_per_minute, clock=clock),
             breaker=CircuitBreaker(s.breaker_failure_threshold, s.breaker_cooldown_seconds, clock=clock),
             base_instructions=(PROJECT_ROOT / "config" / "assistant.md").read_text(encoding="utf-8"),
-            now=lambda: NOW,
+            now=lambda: CLOCK.now,
         )
 
     return factory

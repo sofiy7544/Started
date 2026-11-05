@@ -39,7 +39,10 @@ async def send_answer(
 ) -> None:
     """Отправляет ответ: голосом (если так настроено и ответ успешный) и всегда — текстом.
     Если озвучить не удалось, ответ не теряется: он приходит текстом."""
+    from pai.bot.handlers.reminders import send_cards
+
     if not answer.text:
+        await send_cards(message, answer)
         return
     voice = app.voice
     if (
@@ -58,11 +61,13 @@ async def send_answer(
             fits = len(answer.text) <= CAPTION_LIMIT and not spoken.truncated
             await message.answer_voice(file, caption=answer.text if fits else None)
             if fits:
+                await send_cards(message, answer)
                 return
             if spoken.truncated:
                 await message.answer(texts.TTS_TRUNCATED)
     for part in split_message(answer.text):
         await message.answer(part)
+    await send_cards(message, answer)
 
 
 async def on_voice(message: Message, bot: Bot, app: AppContext) -> None:

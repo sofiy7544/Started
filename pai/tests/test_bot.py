@@ -71,7 +71,7 @@ async def test_start_shows_menu_keyboard(harness) -> None:
     keyboard = last_markup(tg)["keyboard"]
     labels = [b["text"] for row in keyboard for b in row]
     assert labels == [texts.BTN_NEW, texts.BTN_MEMORY, texts.BTN_MODEL, texts.BTN_VOICE,
-                      texts.BTN_SETTINGS, texts.BTN_STATS, texts.BTN_HELP]
+                      texts.BTN_REMINDERS, texts.BTN_SETTINGS, texts.BTN_STATS, texts.BTN_HELP]
 
 
 async def test_chat_with_typing_and_context(harness, script) -> None:

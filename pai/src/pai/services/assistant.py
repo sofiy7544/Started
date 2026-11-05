@@ -10,8 +10,9 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from zoneinfo import ZoneInfo
 
+from pydantic_ai import ModelMessagesTypeAdapter
+from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -22,6 +23,10 @@ from pai.db.models import AuditEvent, Conversation, Turn, User
 from pai.llm.catalog import Catalog, ModelInfo
 from pai.llm.engine import ChatEngine, FailureKind, LLMFailure, load_history
 from pai.memory.engine import MemoryEngine
+from pai.reminders.schedule import WEEKDAYS_NOM, calendar_hint, zone
+from pai.reminders.service import ReminderService
+from pai.reminders.tools import INSTRUCTIONS as REMINDER_INSTRUCTIONS
+from pai.reminders.tools import ReminderEffects, build_toolset
 from pai.services.budget import BudgetGuard
 from pai.services.limits import CircuitBreaker, RateLimiter
 
@@ -62,6 +67,7 @@ class Answer:
     text: str | None
     model: ModelInfo | None = None
     cost_usd: Decimal = Decimal(0)
+    reminders: ReminderEffects | None = None  # что реально сделали инструменты напоминаний
 
 
 class Assistant:
@@ -77,6 +83,7 @@ class Assistant:
         breaker: CircuitBreaker,
         base_instructions: str,
         memory: MemoryEngine | None = None,
+        reminders: ReminderService | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._sessions = sessions
@@ -89,6 +96,7 @@ class Assistant:
         self._base_instructions = base_instructions.strip()
         self._now = now
         self.memory = memory
+        self.reminders = reminders
         self._locks: dict[int, asyncio.Lock] = {}
 
     @property
@@ -145,6 +153,14 @@ class Assistant:
             await self._update_user(user, **values)
             await self.audit(user.tg_id, "voice_settings_changed", ",".join(sorted(values)))
 
+    async def set_schedule_prefs(self, user: User, **values: object) -> None:
+        """Инициатива, частота, тихие часы, часовой пояс (значения проверяет обработчик)."""
+        allowed = {"proactive_enabled", "proactive_frequency", "quiet_start", "quiet_end", "timezone"}
+        values = {k: v for k, v in values.items() if k in allowed}
+        if values:
+            await self._update_user(user, **values)
+            await self.audit(user.tg_id, "schedule_settings_changed", ",".join(sorted(values)))
+
     async def set_instructions(self, user: User, text: str | None) -> None:
         value = text.strip()[:2000] if text and text.strip() else None
         await self._update_user(user, instructions=value)
@@ -156,6 +172,40 @@ class Assistant:
             await s.execute(update(User).where(User.id == user.id).values(**values))
         for key, value in values.items():
             setattr(user, key, value)
+
+    async def record_outgoing(self, user_id: int, note: str, text: str) -> None:
+        """Сообщение, которое бот отправил сам (напоминание, инициатива), — в историю разговора,
+        чтобы ответ владельца («да, сделал») был понятен модели. user_text пустой — служебная запись."""
+        messages = ModelMessagesTypeAdapter.dump_json(
+            [
+                ModelRequest(parts=[UserPromptPart(content=f"(служебно: {note})")]),
+                ModelResponse(parts=[TextPart(content=text)]),
+            ]
+        )
+        async with self._user_lock(user_id), self._sessions() as s, s.begin():
+            user = await s.scalar(select(User).where(User.id == user_id))
+            if user is None:
+                return
+            conv = await self._open_conversation(s, user)
+            s.add(
+                Turn(
+                    conversation_id=conv.id,
+                    user_id=user_id,
+                    user_text="",
+                    assistant_text=text,
+                    messages=messages,
+                    model_id="system",
+                    memory_processed=True,
+                    created_at=self._now(),
+                )
+            )
+
+    async def last_user_activity(self, user_id: int) -> datetime | None:
+        async with self._sessions() as s:
+            value = await s.scalar(
+                select(func.max(Turn.created_at)).where(Turn.user_id == user_id, Turn.user_text != "")
+            )
+        return value if value is None or value.tzinfo else value.replace(tzinfo=UTC)
 
     async def new_conversation(self, user: User) -> None:
         async with self._user_lock(user.id), self._sessions() as s, s.begin():
@@ -218,12 +268,14 @@ class Assistant:
     async def _history(self, s, conv: Conversation) -> tuple[list[bytes], int]:  # type: ignore[no-untyped-def]
         """Последние обмены разговора в пределах лимитов (по целым обменам — чтобы не
         разорвать пары «вызов инструмента — результат»)."""
-        rows = (await s.execute(
-            select(Turn.messages, func.length(Turn.user_text) + func.length(Turn.assistant_text))
-            .where(Turn.conversation_id == conv.id)
-            .order_by(Turn.id.desc())
-            .limit(self._settings.max_history_turns)
-        )).all()
+        rows = (
+            await s.execute(
+                select(Turn.messages, func.length(Turn.user_text) + func.length(Turn.assistant_text))
+                .where(Turn.conversation_id == conv.id)
+                .order_by(Turn.id.desc())
+                .limit(self._settings.max_history_turns)
+            )
+        ).all()
         picked: list[bytes] = []
         chars = 0
         for blob, size in rows:
@@ -235,7 +287,8 @@ class Assistant:
         return picked, chars
 
     def _instructions(self, user: User, memory_block: str = "") -> str:
-        now = self._now().astimezone(ZoneInfo("Europe/Moscow"))
+        tz = zone(user.timezone)
+        now = self._now().astimezone(tz)
         parts = [self._base_instructions]
         if memory_block:
             parts.append(memory_block)
@@ -244,7 +297,12 @@ class Assistant:
             parts.append(style)
         if user.instructions:
             parts.append("Личные пожелания владельца (важнее общих правил оформления):\n" + user.instructions)
-        parts.append(f"Сейчас {now:%d.%m.%Y %H:%M} (Москва).")
+        parts.append(
+            f"Сейчас {now:%d.%m.%Y %H:%M}, {WEEKDAYS_NOM[now.weekday()]}; часовой пояс владельца — "
+            f"{user.timezone}. Ближайшие дни: {calendar_hint(self._now(), tz)}."
+        )
+        if self.reminders is not None:
+            parts.append(REMINDER_INSTRUCTIONS)
         return "\n\n".join(parts)
 
     async def ask(self, user: User, raw_text: str) -> Answer:
@@ -271,42 +329,73 @@ class Assistant:
             history = load_history(blobs)
 
             reservation = await self._budget.reserve(
-                model, input_chars=len(instructions) + history_chars + len(text),
+                model,
+                input_chars=len(instructions) + history_chars + len(text),
                 max_output_tokens=self._settings.max_reply_tokens,
             )
             if reservation is None:
-                return Answer(Outcome.BUDGET, texts.BUDGET_EXHAUSTED if not self._budget.disabled
-                              else texts.PAID_DISABLED)
-            cost_limit = min(Decimal(str(self._settings.per_request_cost_limit_usd)),
-                             max(reservation.estimate * 3, Decimal("0.0001")))
+                return Answer(
+                    Outcome.BUDGET,
+                    texts.BUDGET_EXHAUSTED if not self._budget.disabled else texts.PAID_DISABLED,
+                )
+            cost_limit = min(
+                Decimal(str(self._settings.per_request_cost_limit_usd)),
+                max(reservation.estimate * 3, Decimal("0.0001")),
+            )
+            effects = ReminderEffects()
+            toolsets = [build_toolset(self.reminders, user, effects)] if self.reminders else None
             try:
                 reply = await self._budget.paid_call(
                     reservation,
                     lambda: self._engine.reply(
-                        model, prompt=text, history=history, instructions=instructions,
-                        max_tokens=self._settings.max_reply_tokens, cost_limit_usd=cost_limit,
+                        model,
+                        prompt=text,
+                        history=history,
+                        instructions=instructions,
+                        max_tokens=self._settings.max_reply_tokens,
+                        cost_limit_usd=cost_limit,
+                        toolsets=toolsets,
                     ),
-                    user_id=user.id, operation="chat",
+                    user_id=user.id,
+                    operation="chat",
                 )
             except LLMFailure as exc:
                 self._breaker.failure(exc.kind)
-                level = logging.ERROR if exc.kind in (FailureKind.AUTH, FailureKind.CONFIG,
-                                                      FailureKind.QUOTA) else logging.WARNING
+                level = (
+                    logging.ERROR
+                    if exc.kind in (FailureKind.AUTH, FailureKind.CONFIG, FailureKind.QUOTA)
+                    else logging.WARNING
+                )
                 log.log(level, "llm failure user=%s model=%s: %s", user.id, model.id, exc)
                 await self.audit(user.tg_id, "llm_error", f"{model.id}: {exc.kind.value}")
-                return Answer(Outcome.FAILED, _FAILURE_TEXTS[exc.kind], model)
+                # Инструменты могли успеть сработать до ошибки — карточки всё равно покажем.
+                return Answer(
+                    Outcome.FAILED,
+                    _FAILURE_TEXTS[exc.kind],
+                    model,
+                    reminders=effects if effects.any else None,
+                )
             self._breaker.success()
 
             answer = reply.text or texts.EMPTY_ANSWER
             async with self._sessions() as s, s.begin():
-                s.add(Turn(
-                    conversation_id=conv_id, user_id=user.id, user_text=text, assistant_text=answer,
-                    messages=reply.new_messages, model_id=model.id, input_tokens=reply.input_tokens,
-                    output_tokens=reply.output_tokens, cost_usd=reply.cost_usd,
-                ))
+                s.add(
+                    Turn(
+                        conversation_id=conv_id,
+                        user_id=user.id,
+                        user_text=text,
+                        assistant_text=answer,
+                        messages=reply.new_messages,
+                        model_id=model.id,
+                        input_tokens=reply.input_tokens,
+                        output_tokens=reply.output_tokens,
+                        cost_usd=reply.cost_usd,
+                        created_at=self._now(),
+                    )
+                )
         if self.memory is not None:
             self.memory.schedule(user.id)
-        return Answer(Outcome.OK, answer, model, reply.cost_usd)
+        return Answer(Outcome.OK, answer, model, reply.cost_usd, reminders=effects if effects.any else None)
 
     @contextlib.asynccontextmanager
     async def _user_lock(self, user_id: int) -> AsyncIterator[None]:

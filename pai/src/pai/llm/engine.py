@@ -190,6 +190,7 @@ class PydanticAIEngine:
         instructions: str,
         max_tokens: int,
         cost_limit_usd: Decimal,
+        toolsets: list | None = None,
     ):  # type: ignore[no-untyped-def]
         settings, limits = self._run_settings(model, max_tokens, cost_limit_usd)
         try:
@@ -199,6 +200,7 @@ class PydanticAIEngine:
                 instructions=instructions,
                 model_settings=settings,
                 usage_limits=limits,
+                toolsets=toolsets or None,
             )
         except (ai_exc.AgentRunError, ai_exc.UserError) as exc:
             raise classify(exc) from exc
@@ -234,9 +236,11 @@ class PydanticAIEngine:
         instructions: str,
         max_tokens: int,
         cost_limit_usd: Decimal,
+        toolsets: list | None = None,
     ) -> Reply:
+        """Ответ текстом. toolsets — инструменты на этот запрос (напоминания и т. п.)."""
         _result, reply = await self._run(
-            model, str, prompt, history, instructions, max_tokens, cost_limit_usd
+            model, str, prompt, history, instructions, max_tokens, cost_limit_usd, toolsets
         )
         return reply
 

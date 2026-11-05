@@ -31,8 +31,8 @@ def main_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text=texts.BTN_NEW), KeyboardButton(text=texts.BTN_MEMORY)],
             [KeyboardButton(text=texts.BTN_MODEL), KeyboardButton(text=texts.BTN_VOICE)],
-            [KeyboardButton(text=texts.BTN_SETTINGS), KeyboardButton(text=texts.BTN_STATS)],
-            [KeyboardButton(text=texts.BTN_HELP)],
+            [KeyboardButton(text=texts.BTN_REMINDERS), KeyboardButton(text=texts.BTN_SETTINGS)],
+            [KeyboardButton(text=texts.BTN_STATS), KeyboardButton(text=texts.BTN_HELP)],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -65,17 +65,23 @@ def models_text(app: AppContext) -> str:
     return "\n".join(lines)
 
 
-def settings_keyboard(style: str) -> InlineKeyboardMarkup:
+def settings_keyboard(style: str, user=None) -> InlineKeyboardMarkup:  # type: ignore[no-untyped-def]
     style_row = [
         InlineKeyboardButton(text=("✅ " if key == style else "") + texts.STYLE_TITLES[key],
                              callback_data=f"style:{key}")
         for key in REPLY_STYLES
     ]
-    return InlineKeyboardMarkup(inline_keyboard=[
+    rows = [
         style_row,
         [InlineKeyboardButton(text="✏️ Мои инструкции", callback_data="instr:edit")],
         [InlineKeyboardButton(text="🗑 Удалить инструкции", callback_data="instr:clear")],
-    ])
+    ]
+    if user is not None:
+        from pai.bot.handlers.reminders import schedule_settings_rows
+
+        rows += [[InlineKeyboardButton(text=t, callback_data=d) for t, d in row]
+                 for row in schedule_settings_rows(user)]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def _user(app: AppContext, message_or_cb):  # type: ignore[no-untyped-def]
@@ -131,16 +137,28 @@ async def cmd_stats(message: Message, app: AppContext) -> None:
 
 
 async def _settings_message(app: AppContext, user) -> str:  # type: ignore[no-untyped-def]
+    from pai.proactive.service import FREQUENCY_TITLES
+
     return texts.settings_text(
         model_title=app.assistant.current_model(user).title, style=user.reply_style,
         instructions=user.instructions, budget=app.assistant.budget.limit,
         spent=await app.assistant.budget.spent_this_month(),
+    ) + (
+        f"\n\n🔔 Инициативные сообщения: {'вкл' if user.proactive_enabled else 'выкл'}, "
+        f"{FREQUENCY_TITLES.get(user.proactive_frequency, user.proactive_frequency)}\n"
+        f"🌙 Тихие часы: {texts.quiet_text(user.quiet_start, user.quiet_end)}\n"
+        f"🌍 Часовой пояс: {user.timezone} (другой — /timezone Europe/…)"
     )
+
+
+async def settings_message_and_keyboard(app: AppContext, user):  # type: ignore[no-untyped-def]
+    return await _settings_message(app, user), settings_keyboard(user.reply_style, user)
 
 
 async def cmd_settings(message: Message, app: AppContext) -> None:
     user = await _user(app, message)
-    await message.answer(await _settings_message(app, user), reply_markup=settings_keyboard(user.reply_style))
+    text, kb = await settings_message_and_keyboard(app, user)
+    await message.answer(text, reply_markup=kb)
 
 
 async def cb_style(callback: CallbackQuery, app: AppContext) -> None:
@@ -152,7 +170,7 @@ async def cb_style(callback: CallbackQuery, app: AppContext) -> None:
     await callback.answer(f"Стиль: {texts.STYLE_TITLES[style]}")
     if isinstance(callback.message, Message):
         await callback.message.edit_text(await _settings_message(app, user),
-                                         reply_markup=settings_keyboard(style))
+                                         reply_markup=settings_keyboard(style, user))
 
 
 async def cb_instructions_edit(callback: CallbackQuery, state: FSMContext) -> None:
@@ -168,7 +186,7 @@ async def cb_instructions_clear(callback: CallbackQuery, app: AppContext) -> Non
     await callback.answer()
     if isinstance(callback.message, Message):
         await callback.message.edit_text(await _settings_message(app, user),
-                                         reply_markup=settings_keyboard(user.reply_style))
+                                         reply_markup=settings_keyboard(user.reply_style, user))
         await callback.message.answer(texts.INSTRUCTIONS_CLEARED)
 
 
