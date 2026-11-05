@@ -26,7 +26,7 @@ from pai.media.context import MEDIA_INSTRUCTIONS, PreparedMedia
 from pai.media.engine import MediaEngine
 from pai.media.ocr import OCR_INSTRUCTIONS
 from pai.media.outputs import GeneratedFile
-from pai.media.tools import FileEffects
+from pai.media.tools import FILES_INSTRUCTIONS, FileEffects
 from pai.media.tools import build_toolset as build_media_toolset
 from pai.memory.engine import MemoryEngine
 from pai.reminders.schedule import WEEKDAYS_NOM, calendar_hint, zone
@@ -312,10 +312,19 @@ class Assistant:
             f"Сейчас {now:%d.%m.%Y %H:%M}, {WEEKDAYS_NOM[now.weekday()]}; часовой пояс владельца — "
             f"{user.timezone}. Ближайшие дни: {calendar_hint(self._now(), tz)}."
         )
+        if now.hour < 5:
+            # После полуночи люди говорят «завтра», имея в виду наступающее утро.
+            parts.append(
+                f"Сейчас ночь ({now:%H:%M}). «Завтра», «утром», «завтра утром» владелец почти наверняка "
+                f"имеет в виду наступающий день — сегодня, {now:%d.%m.%Y} ({WEEKDAYS_NOM[now.weekday()]}), "
+                "а не следующий. Ставь на эту дату; при ответе назови дату явно."
+            )
         if self.reminders is not None:
             parts.append(REMINDER_INSTRUCTIONS)
         if manifest:
             parts += [MEDIA_INSTRUCTIONS, OCR_INSTRUCTIONS, manifest]
+        elif self.media is not None:
+            parts.append(FILES_INSTRUCTIONS)
         return "\n\n".join(parts)
 
     async def ask(self, user: User, raw_text: str, media: PreparedMedia | None = None) -> Answer:
@@ -383,8 +392,9 @@ class Assistant:
             effects = ReminderEffects()
             file_effects = FileEffects()
             toolsets = [build_toolset(self.reminders, user, effects)] if self.reminders else []
-            if manifest and self.media is not None:
-                toolsets.append(build_media_toolset(self.media, user.id, conv_id, file_effects))
+            if self.media is not None:
+                toolsets.append(build_media_toolset(self.media, user.id, conv_id, file_effects,
+                                                    attachments=bool(manifest)))
             try:
                 reply = await self._budget.paid_call(
                     reservation,

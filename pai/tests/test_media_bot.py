@@ -337,3 +337,27 @@ async def test_long_voice_is_transcribed_in_parts_even_without_duration(mbot, sc
     await send(lambda: tg.push_voice(OWNER, make_audio(170.0), duration=0))  # Telegram не указал длительность
     assert eng.stt.calls == 2  # 170 с → две части по 2 минуты
     assert script.seen[-1].user_prompts[-1] == "часть часть"
+
+
+async def test_files_can_be_created_without_attachments(mbot, script) -> None:
+    send, tg, *_ = mbot
+    script.replies = [{"tool": "create_file", "args": {"filename": "clean.bat", "content": "del /q %TEMP%\\*"}},
+                      "Скрипт во вложении: запустите двойным щелчком."]
+    calls = await send(lambda: tg.push_text(OWNER, "напиши скрипт чистки временных файлов"))
+    doc = next(p for m, p in calls if m == "sendDocument")
+    sent = doc[doc["document"].removeprefix("attach://")]
+    assert sent.filename == "clean.bat" and sent.data.startswith(b"@chcp 65001 >nul\r\n")
+    assert "create_file" in script.seen[-1].instructions and "Опись вложений" not in script.seen[-1].instructions
+
+
+async def test_night_tomorrow_means_coming_morning(make_assistant, script) -> None:
+    from tests.conftest import CLOCK
+
+    a = make_assistant()
+    user = await a.get_user(OWNER)
+    CLOCK.now = CLOCK.now.replace(hour=23, minute=17)  # 01:17 по Киеву, уже 5 ноября
+    await a.ask(user, "напомни завтра в 9")
+    assert "Сейчас ночь (01:17)" in script.seen[-1].instructions and "сегодня, 05.11.2026" in script.seen[-1].instructions
+    CLOCK.now = CLOCK.now.replace(hour=12)
+    await a.ask(user, "напомни завтра в 9")
+    assert "Сейчас ночь" not in script.seen[-1].instructions
