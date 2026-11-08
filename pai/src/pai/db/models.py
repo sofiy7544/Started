@@ -309,3 +309,21 @@ class AttachmentChunk(Base):
     notes: Mapped[str | None] = mapped_column(Text)
 
     __table_args__ = (UniqueConstraint("attachment_id", "idx", name="uq_chunk_idx"),)
+
+
+class Task(Base):
+    """Задача владельца (план работ): раздел, что сделать, кто, когда, статус."""
+
+    __tablename__ = "tasks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    section: Mapped[str] = mapped_column(String(100), default="Общее", nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    person: Mapped[str | None] = mapped_column(String(100))  # кто делает / с кем
+    due: Mapped[str | None] = mapped_column(String(50))  # срок как сказал владелец
+    status: Mapped[str] = mapped_column(String(10), default="open", nullable=False)  # open|done|cancelled
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (Index("ix_tasks_user", "user_id", "status"),)

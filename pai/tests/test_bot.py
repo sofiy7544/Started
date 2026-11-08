@@ -70,7 +70,7 @@ async def test_start_shows_menu_keyboard(harness) -> None:
     assert "личный AI-ассистент" in out[0]
     keyboard = last_markup(tg)["keyboard"]
     labels = [b["text"] for row in keyboard for b in row]
-    assert labels == [texts.BTN_NEW, texts.BTN_MEMORY, texts.BTN_MODEL, texts.BTN_VOICE,
+    assert labels == [texts.BTN_NEW, texts.BTN_MEMORY, texts.BTN_MODEL, texts.BTN_VOICE, texts.BTN_TASKS,
                       texts.BTN_REMINDERS, texts.BTN_SETTINGS, texts.BTN_STATS, texts.BTN_HELP]
 
 

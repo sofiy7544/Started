@@ -72,6 +72,7 @@ async def run(settings: Settings, *, engine: ChatEngine | None = None, verify: b
                                engine=chat_engine, budget=budget)
                   if settings.memory_enabled else None)
         reminder_service = ReminderService(sessions)
+        from pai.tasks.service import TaskService
         voice = build_voice(settings, budget)
         media: MediaEngine | None = None
         if settings.media_enabled:
@@ -82,7 +83,7 @@ async def run(settings: Settings, *, engine: ChatEngine | None = None, verify: b
             loops.append(asyncio.create_task(store.run_forever()))  # удаление файлов после срока хранения
         assistant = Assistant(
             sessions=sessions, settings=settings, catalog=catalog, engine=chat_engine, budget=budget,
-            memory=memory, reminders=reminder_service, media=media,
+            memory=memory, reminders=reminder_service, media=media, tasks=TaskService(sessions),
             rate_limiter=RateLimiter(settings.messages_per_minute),
             breaker=CircuitBreaker(settings.breaker_failure_threshold, settings.breaker_cooldown_seconds),
             base_instructions=instructions,

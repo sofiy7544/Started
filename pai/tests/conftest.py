@@ -189,6 +189,7 @@ def make_assistant(sessions, settings, script, clock, tmp_path) -> AssistantFact
         return Assistant(
             sessions=sess, settings=s, catalog=catalog, engine=engine, budget=budget, memory=memory,
             media=media_engine,
+            tasks=__import__("pai.tasks.service", fromlist=["TaskService"]).TaskService(sess, now=lambda: CLOCK.now),
             reminders=ReminderService(sess, now=lambda: CLOCK.now),
             rate_limiter=RateLimiter(s.messages_per_minute, clock=clock),
             breaker=CircuitBreaker(s.breaker_failure_threshold, s.breaker_cooldown_seconds, clock=clock),

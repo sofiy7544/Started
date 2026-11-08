@@ -62,3 +62,5 @@ select = ["E", "F", "W", "B", "UP", "I"]
 "src/pai/proactive/service.py" = ["E501"]
 # Тексты для модели и владельца в модуле вложений.
 "src/pai/media/*" = ["E501"]
+"src/pai/tasks/*" = ["E501"]
+"src/pai/bot/handlers/tasks.py" = ["E501"]

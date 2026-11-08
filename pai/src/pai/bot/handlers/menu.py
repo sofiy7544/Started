@@ -31,8 +31,9 @@ def main_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text=texts.BTN_NEW), KeyboardButton(text=texts.BTN_MEMORY)],
             [KeyboardButton(text=texts.BTN_MODEL), KeyboardButton(text=texts.BTN_VOICE)],
-            [KeyboardButton(text=texts.BTN_REMINDERS), KeyboardButton(text=texts.BTN_SETTINGS)],
-            [KeyboardButton(text=texts.BTN_STATS), KeyboardButton(text=texts.BTN_HELP)],
+            [KeyboardButton(text=texts.BTN_TASKS), KeyboardButton(text=texts.BTN_REMINDERS)],
+            [KeyboardButton(text=texts.BTN_SETTINGS), KeyboardButton(text=texts.BTN_STATS)],
+            [KeyboardButton(text=texts.BTN_HELP)],
         ],
         resize_keyboard=True,
         is_persistent=True,

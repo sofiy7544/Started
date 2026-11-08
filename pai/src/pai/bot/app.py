@@ -31,6 +31,7 @@ COMMANDS = [
     BotCommand(command="remember", description="Запомнить: /remember текст"),
     BotCommand(command="model", description="Выбрать модель"),
     BotCommand(command="voice", description="Голос: режим, тембр, скорость"),
+    BotCommand(command="tasks", description="Список задач (план работ)"),
     BotCommand(command="reminders", description="Мои напоминания"),
     BotCommand(command="add_reminder", description="Создать напоминание"),
     BotCommand(command="delete_reminder", description="Удалить напоминание"),
@@ -158,7 +159,7 @@ def split_message(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list[str]:
 
 def build_dispatcher(app: AppContext) -> Dispatcher:
     from pai.bot.collector import Collector
-    from pai.bot.handlers import chat, media, memory, menu, reminders, voice
+    from pai.bot.handlers import chat, media, memory, menu, reminders, tasks, voice
 
     dp = Dispatcher(storage=MemoryStorage(), app=app)
     collector = None
@@ -179,6 +180,7 @@ def build_dispatcher(app: AppContext) -> Dispatcher:
         dp.include_router(media.create_router())
     dp.include_router(voice.create_router())
     dp.include_router(reminders.create_router())
+    dp.include_router(tasks.create_router())
     dp.include_router(chat.create_router())
     return dp
 

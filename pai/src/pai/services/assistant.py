@@ -35,6 +35,9 @@ from pai.reminders.tools import INSTRUCTIONS as REMINDER_INSTRUCTIONS
 from pai.reminders.tools import ReminderEffects, build_toolset
 from pai.services.budget import BudgetGuard
 from pai.services.limits import CircuitBreaker, RateLimiter
+from pai.tasks.service import TaskService
+from pai.tasks.tools import INSTRUCTIONS as TASK_INSTRUCTIONS
+from pai.tasks.tools import build_toolset as build_task_toolset
 
 log = logging.getLogger(__name__)
 
@@ -92,6 +95,7 @@ class Assistant:
         memory: MemoryEngine | None = None,
         reminders: ReminderService | None = None,
         media: MediaEngine | None = None,
+        tasks: TaskService | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._sessions = sessions
@@ -106,6 +110,7 @@ class Assistant:
         self.memory = memory
         self.reminders = reminders
         self.media = media
+        self.tasks = tasks
         self._locks: dict[int, asyncio.Lock] = {}
 
     @property
@@ -321,6 +326,8 @@ class Assistant:
             )
         if self.reminders is not None:
             parts.append(REMINDER_INSTRUCTIONS)
+        if self.tasks is not None:
+            parts.append(TASK_INSTRUCTIONS)
         if manifest:
             parts += [MEDIA_INSTRUCTIONS, OCR_INSTRUCTIONS, manifest]
         elif self.media is not None:
@@ -392,6 +399,8 @@ class Assistant:
             effects = ReminderEffects()
             file_effects = FileEffects()
             toolsets = [build_toolset(self.reminders, user, effects)] if self.reminders else []
+            if self.tasks is not None:
+                toolsets.append(build_task_toolset(self.tasks, user.id, []))
             if self.media is not None:
                 toolsets.append(build_media_toolset(self.media, user.id, conv_id, file_effects,
                                                     attachments=bool(manifest)))
