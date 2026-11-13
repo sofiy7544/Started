@@ -8,7 +8,7 @@ from aiogram.types import Message
 from aiogram.utils.chat_action import ChatActionSender
 
 from pai.bot import texts
-from pai.bot.app import AppContext
+from pai.bot.app import AppContext, OwnerOnly
 from pai.bot.collector import Collector, Piece
 
 
@@ -40,7 +40,8 @@ async def on_other(message: Message) -> None:
 
 def create_router() -> Router:
     r = Router(name="chat")
-    r.message.filter(F.chat.type == ChatType.PRIVATE)
+    r.message.filter(F.chat.type == ChatType.PRIVATE, OwnerOnly())
+    r.callback_query.filter(OwnerOnly())
     r.message.register(unknown_command, F.text.startswith("/"))
     r.message.register(on_text, F.text)
     r.message.register(on_file, F.document | F.photo)

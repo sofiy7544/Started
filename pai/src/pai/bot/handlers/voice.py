@@ -18,7 +18,7 @@ from aiogram.types import (
 from aiogram.utils.chat_action import ChatActionSender
 
 from pai.bot import texts
-from pai.bot.app import AppContext, split_message
+from pai.bot.app import AppContext, OwnerOnly, split_message
 from pai.bot.collector import Collector, Piece
 from pai.services.assistant import Answer, Outcome
 from pai.voice.engine import SPEEDS, VOICE_MODES, VoiceLimitError
@@ -254,7 +254,8 @@ async def cb_sample(callback: CallbackQuery, bot: Bot, app: AppContext) -> None:
 
 def create_router() -> Router:
     r = Router(name="voice")
-    r.message.filter(F.chat.type == ChatType.PRIVATE)
+    r.message.filter(F.chat.type == ChatType.PRIVATE, OwnerOnly())
+    r.callback_query.filter(OwnerOnly())
     r.message.register(cmd_voice, Command("voice"))
     r.message.register(cmd_voice, F.text == texts.BTN_VOICE)
     r.message.register(on_voice, F.voice | F.audio | F.video_note)

@@ -19,7 +19,7 @@ from aiogram.types import (
 )
 
 from pai.bot import texts
-from pai.bot.app import AppContext, split_message
+from pai.bot.app import AppContext, OwnerOnly, split_message
 from pai.memory.store import KIND_TITLES
 
 PAGE_SIZE = 8
@@ -222,7 +222,8 @@ async def cb_cancel(callback: CallbackQuery) -> None:
 
 def create_router() -> Router:
     r = Router(name="memory")
-    r.message.filter(F.chat.type == ChatType.PRIVATE)
+    r.message.filter(F.chat.type == ChatType.PRIVATE, OwnerOnly())
+    r.callback_query.filter(OwnerOnly())
     r.message.register(cmd_memory, Command("memory"))
     r.message.register(cmd_memory, F.text == texts.BTN_MEMORY)
     r.message.register(cmd_remember, Command("remember"))

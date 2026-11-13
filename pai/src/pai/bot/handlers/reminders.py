@@ -13,7 +13,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from aiogram.utils.chat_action import ChatActionSender
 
 from pai.bot import texts
-from pai.bot.app import AppContext
+from pai.bot.app import AppContext, OwnerOnly
 from pai.proactive.service import FREQUENCY_TITLES
 from pai.reminders.schedule import ScheduleError, zone
 from pai.reminders.service import ReminderError
@@ -258,7 +258,8 @@ async def cb_schedule(callback: CallbackQuery, app: AppContext) -> None:
 
 def create_router() -> Router:
     r = Router(name="reminders")
-    r.message.filter(F.chat.type == ChatType.PRIVATE)
+    r.message.filter(F.chat.type == ChatType.PRIVATE, OwnerOnly())
+    r.callback_query.filter(OwnerOnly())
     r.message.register(cmd_reminders, Command("reminders"))
     r.message.register(cmd_reminders, F.text == texts.BTN_REMINDERS)
     r.message.register(cmd_add, Command("add_reminder"))

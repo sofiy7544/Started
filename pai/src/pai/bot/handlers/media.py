@@ -15,7 +15,7 @@ from aiogram.types import Message
 from aiogram.utils.chat_action import ChatActionSender
 
 from pai.bot import texts
-from pai.bot.app import AppContext
+from pai.bot.app import AppContext, OwnerOnly
 from pai.bot.collector import Batch, Collector, Piece
 from pai.media.files import FileTooBig, IncomingFile, download, files_of
 from pai.media.safety import safe_name
@@ -99,6 +99,7 @@ async def run_batch(app: AppContext, batch: Batch) -> None:
 
 def create_router() -> Router:
     r = Router(name="media")
-    r.message.filter(F.chat.type == ChatType.PRIVATE)
+    r.message.filter(F.chat.type == ChatType.PRIVATE, OwnerOnly())
+    r.callback_query.filter(OwnerOnly())
     r.message.register(on_media, F.photo | F.document | F.video | F.animation | F.audio)
     return r

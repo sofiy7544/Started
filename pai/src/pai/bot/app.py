@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from aiogram import BaseMiddleware, Bot, Dispatcher
+from aiogram.filters import Filter
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand, ErrorEvent, TelegramObject, Update
 from sqlalchemy.exc import IntegrityError
@@ -19,6 +20,7 @@ from pai.config import Settings
 from pai.db.models import AuditEvent, ProcessedUpdate
 from pai.media.engine import MediaEngine
 from pai.services.assistant import Assistant
+from pai.training.service import TrainingService
 from pai.voice.engine import VoiceEngine
 
 log = logging.getLogger(__name__)
@@ -50,6 +52,20 @@ class AppContext:
     sessions: async_sessionmaker
     voice: VoiceEngine | None = None
     media: MediaEngine | None = None
+    training: TrainingService | None = None
+
+
+def is_owner(app: AppContext, user_id: int | None) -> bool:
+    return user_id is not None and user_id in app.settings.allowed_telegram_ids
+
+
+class OwnerOnly(Filter):
+    """Только владелец. Стоит на всех роутерах личного ассистента: сотрудники из рабочей группы
+    не могут попасть ни в переписку с ИИ, ни в память, задачи и напоминания владельца."""
+
+    async def __call__(self, event, app: AppContext) -> bool:  # type: ignore[no-untyped-def,override]
+        user = getattr(event, "from_user", None)
+        return is_owner(app, user.id if user else None)
 
 
 def _sender_id(update: Update) -> int | None:
@@ -64,9 +80,11 @@ class AccessMiddleware(BaseMiddleware):
     тратит деньги; отказ ему показываем не чаще раза в час, попытку пишем в журнал."""
 
     def __init__(self, allowed: set[int], sessions: async_sessionmaker,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+                 clock: Callable[[], float] = time.monotonic,
+                 training: TrainingService | None = None) -> None:
         self._allowed = allowed
         self._sessions = sessions
+        self._training = training
         self._clock = clock
         self._last_notice: dict[int, float] = {}
 
@@ -81,6 +99,14 @@ class AccessMiddleware(BaseMiddleware):
             return await handler(event, data)
         if sender is None:
             return None  # служебные апдейты без отправителя не обрабатываем
+        msg = event.message or event.edited_message
+        chat_type = msg.chat.type if msg is not None else None
+        if chat_type in ("group", "supergroup"):
+            # Группы: только модуль контроля обучения (если включён); отказы в группу не пишем.
+            return await handler(event, data) if self._training is not None else None
+        if (self._training is not None and chat_type == "private"
+                and await self._training.person_by_tg(sender) is not None):
+            return await handler(event, data)  # сотрудник рабочей группы — только /start, /my, /tips, ответы
         now = self._clock()
         if now - self._last_notice.get(sender, -1e9) >= 3600:
             self._last_notice[sender] = now
@@ -159,7 +185,7 @@ def split_message(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list[str]:
 
 def build_dispatcher(app: AppContext) -> Dispatcher:
     from pai.bot.collector import Collector
-    from pai.bot.handlers import chat, media, memory, menu, reminders, tasks, voice
+    from pai.bot.handlers import chat, media, memory, menu, reminders, tasks, training, voice
 
     dp = Dispatcher(storage=MemoryStorage(), app=app)
     collector = None
@@ -171,9 +197,12 @@ def build_dispatcher(app: AppContext) -> Dispatcher:
         )
     dp["collector"] = collector
     # Сначала белый список: посторонние апдейты даже не попадают в журнал дедупликации.
-    dp.update.outer_middleware(AccessMiddleware(set(app.settings.allowed_telegram_ids), app.sessions))
+    dp.update.outer_middleware(AccessMiddleware(set(app.settings.allowed_telegram_ids), app.sessions,
+                                                training=app.training))
     dp.update.outer_middleware(DedupMiddleware(app.sessions))
     dp.errors.register(on_error)
+    if app.training is not None:
+        dp.include_router(training.create_router())  # первым: группа и сотрудники заканчиваются здесь
     dp.include_router(menu.create_router())
     dp.include_router(memory.create_router())
     if app.media is not None:
@@ -185,5 +214,30 @@ def build_dispatcher(app: AppContext) -> Dispatcher:
     return dp
 
 
-async def set_commands(bot: Bot) -> None:
-    await bot.set_my_commands(COMMANDS)
+TRAINING_COMMANDS = [
+    BotCommand(command="today", description="Обучение: сводка за сегодня"),
+    BotCommand(command="week", description="Обучение: сводка за неделю"),
+    BotCommand(command="employee", description="Обучение: история сотрудника"),
+    BotCommand(command="staff", description="Обучение: список сотрудников"),
+    BotCommand(command="add", description="Обучение: добавить сотрудника"),
+    BotCommand(command="remove", description="Обучение: убрать сотрудника"),
+    BotCommand(command="off", description="Обучение: выходной/отпуск сотрудника"),
+    BotCommand(command="schedule", description="Обучение: рабочие часы и проверки"),
+    BotCommand(command="announce", description="Обучение: сообщение в группу"),
+]
+EMPLOYEE_COMMANDS = [
+    BotCommand(command="my", description="Моя статистика за неделю"),
+    BotCommand(command="tips", description="Как выстроить обучение"),
+]
+
+
+async def set_commands(bot: Bot, owner_ids: list[int] | None = None, training: bool = False) -> None:
+    """Меню команд: владельцу — всё, остальным (сотрудникам) — только /my и /tips."""
+    from aiogram.types import BotCommandScopeChat
+
+    if not training or not owner_ids:
+        await bot.set_my_commands(COMMANDS)
+        return
+    await bot.set_my_commands(EMPLOYEE_COMMANDS)
+    for owner in owner_ids:
+        await bot.set_my_commands(COMMANDS + TRAINING_COMMANDS, scope=BotCommandScopeChat(chat_id=owner))

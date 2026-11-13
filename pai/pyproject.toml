@@ -63,4 +63,6 @@ select = ["E", "F", "W", "B", "UP", "I"]
 # Тексты для модели и владельца в модуле вложений.
 "src/pai/media/*" = ["E501"]
 "src/pai/tasks/*" = ["E501"]
+"src/pai/training/*" = ["E501"]
+"src/pai/bot/handlers/training.py" = ["E501"]
 "src/pai/bot/handlers/tasks.py" = ["E501"]

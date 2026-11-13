@@ -17,7 +17,7 @@ from aiogram.types import (
 )
 
 from pai.bot import texts
-from pai.bot.app import AppContext
+from pai.bot.app import AppContext, OwnerOnly
 from pai.services import stats as stats_service
 from pai.services.assistant import REPLY_STYLES
 
@@ -204,7 +204,8 @@ async def cmd_cancel(message: Message, state: FSMContext) -> None:
 
 def create_router() -> Router:
     r = Router(name="menu")
-    r.message.filter(F.chat.type == ChatType.PRIVATE)
+    r.message.filter(F.chat.type == ChatType.PRIVATE, OwnerOnly())
+    r.callback_query.filter(OwnerOnly())
     r.message.register(cmd_cancel, Command("cancel"))
     r.message.register(cmd_start, CommandStart())
     r.message.register(cmd_menu, Command("menu"))

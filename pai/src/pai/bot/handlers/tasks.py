@@ -14,7 +14,7 @@ from aiogram.types import (
 )
 
 from pai.bot import texts
-from pai.bot.app import AppContext, split_message
+from pai.bot.app import AppContext, OwnerOnly, split_message
 from pai.media.outputs import build_file
 from pai.tasks.service import grouped_text, to_csv_table
 
@@ -51,7 +51,8 @@ async def cb_xlsx(callback: CallbackQuery, app: AppContext) -> None:
 
 def create_router() -> Router:
     r = Router(name="tasks")
-    r.message.filter(F.chat.type == ChatType.PRIVATE)
+    r.message.filter(F.chat.type == ChatType.PRIVATE, OwnerOnly())
+    r.callback_query.filter(OwnerOnly())
     r.message.register(cmd_tasks, Command("tasks"))
     r.message.register(cmd_tasks, F.text == texts.BTN_TASKS)
     r.callback_query.register(cb_xlsx, F.data == "tasks:xlsx")

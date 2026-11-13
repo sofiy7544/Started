@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    Date,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -327,3 +329,97 @@ class Task(Base):
     done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (Index("ix_tasks_user", "user_id", "status"),)
+
+
+# ---- контроль обучения (рабочая группа). Отдельно от личных данных владельца ----------------
+
+
+class TrainingPerson(Base):
+    """Участник рабочей группы. is_employee — в списке сотрудников; dm_ok — запускал бота в личке."""
+
+    __tablename__ = "training_people"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tg_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    username: Mapped[str | None] = mapped_column(String(64))
+    is_employee: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    dm_ok: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class TrainingRecord(Base):
+    """Запись работы с клиентом. result NULL — подпись не распознана (просили добавить)."""
+
+    __tablename__ = "training_records"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    person_id: Mapped[int] = mapped_column(
+        ForeignKey("training_people.id", ondelete="CASCADE"), nullable=False
+    )
+    caption_name: Mapped[str | None] = mapped_column(String(100))
+    client: Mapped[str | None] = mapped_column(String(200))
+    result: Mapped[str | None] = mapped_column(String(12))  # closed|rescheduled|refused|no_answer
+    reschedule_text: Mapped[str | None] = mapped_column(String(100))
+    reschedule_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    kind: Mapped[str] = mapped_column(String(12), nullable=False)
+    file_id: Mapped[str] = mapped_column(String(300), nullable=False)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    link: Mapped[str | None] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    score: Mapped[float | None] = mapped_column(Float)
+    score_comment: Mapped[str | None] = mapped_column(Text)
+    scored_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        UniqueConstraint("chat_id", "message_id", name="uq_training_record_msg"),
+        Index("ix_training_records_person", "person_id", "created_at"),
+    )
+
+
+class TrainingAbsence(Base):
+    __tablename__ = "training_absences"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    person_id: Mapped[int] = mapped_column(
+        ForeignKey("training_people.id", ondelete="CASCADE"), nullable=False
+    )
+    date_from: Mapped[date] = mapped_column(Date, nullable=False)
+    date_to: Mapped[date] = mapped_column(Date, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class TrainingReason(Base):
+    """Объяснение сотрудника, почему нет записей («нет клиентов», «болею»)."""
+
+    __tablename__ = "training_reasons"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    person_id: Mapped[int] = mapped_column(
+        ForeignKey("training_people.id", ondelete="CASCADE"), nullable=False
+    )
+    day: Mapped[date] = mapped_column(Date, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(String(10), nullable=False)  # group|dm
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class TrainingJob(Base):
+    """Журнал выполненных проверок и отчётов: UNIQUE(kind, key) — после перезапуска ничего не дублируется."""
+
+    __tablename__ = "training_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kind: Mapped[str] = mapped_column(String(30), nullable=False)
+    key: Mapped[str] = mapped_column(String(100), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (UniqueConstraint("kind", "key", name="uq_training_job"),)
+
+
+class TrainingSetting(Base):
+    __tablename__ = "training_settings"
+
+    key: Mapped[str] = mapped_column(String(50), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False)

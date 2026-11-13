@@ -104,14 +104,25 @@ async def run(settings: Settings, *, engine: ChatEngine | None = None, verify: b
                 last_user_activity=assistant.last_user_activity,
             )
             loops.append(asyncio.create_task(proactive.run_forever(sender, assistant.record_outgoing)))
-        dp = build_dispatcher(AppContext(settings, assistant, sessions, voice, media))
-        await set_commands(bot)
+        # Контроль обучения в рабочей группе (config/training.toml). Изолирован от личных данных.
+        from pai.bot.handlers.training import TrainingTelegramSender
+        from pai.training.config import load_training_config
+        from pai.training.scheduler import TrainingScheduler
+        from pai.training.service import TrainingService
+
+        tcfg = load_training_config()
+        training = TrainingService(sessions, tcfg) if tcfg.enabled else None
+        if training is not None:
+            sender_t = TrainingTelegramSender(bot, settings.allowed_telegram_ids[0])
+            loops.append(asyncio.create_task(TrainingScheduler(training, sender_t).run_forever()))
+        dp = build_dispatcher(AppContext(settings, assistant, sessions, voice, media, training))
+        await set_commands(bot, settings.allowed_telegram_ids, training=training is not None)
         await bot.delete_webhook(drop_pending_updates=False)
         available = ", ".join(m.id for m in catalog.available(settings))
         log.info("бот @%s запущен; доступ: %d ID; модели: %s; бюджет $%s, потрачено $%s",
                  me.username, len(settings.allowed_telegram_ids), available,
                  settings.monthly_budget_usd, await assistant.budget.spent_this_month())
-        await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
+        await dp.start_polling(bot, allowed_updates=["message", "edited_message", "callback_query"])
     finally:
         if dp is not None and dp.get("collector") is not None:
             await dp["collector"].close()
