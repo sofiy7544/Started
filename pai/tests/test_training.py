@@ -113,6 +113,7 @@ def gmsg(tg: FakeTelegram, user: int, extra: dict, name: str = "Иван", reply
         uid = tg.push_raw_message(user, body, chat_type="supergroup")
         upd = tg.updates._queue[-1]  # type: ignore[attr-defined]
         upd["message"]["from"]["first_name"] = name
+        upd["message"]["date"] = int(CLOCK.now.timestamp())  # отправлено «сейчас» по часам теста
         return uid
     return push
 
@@ -230,6 +231,9 @@ async def test_activity_check_reason_and_followup(tb, sessions) -> None:
     assert "Оля: нет записей 3 рабочих дня подряд" in report[0]
     assert "Иван: нет записей 2 рабочих дня подряд, причину не сообщил" in report[0]  # пт и сб пусто
     assert sent(await tick(), chat=OWNER) == []  # отчёт не дублируется
+    for d, h in ((8, 10), (8, 22), (9, 9)):  # бот работал и в выходной — данных не терял
+        CLOCK.now = at(h, 0, d=d)
+        await tick()
     CLOCK.now = at(13, 0, d=9)  # пн: Оля всё ещё молчит — повторно в группе не дёргаем
     out = sent(await tick(), chat=GROUP)
     assert not [x for x in out if "Оля" in x]
@@ -495,3 +499,45 @@ async def test_personal_bot_leaves_any_group_when_group_bot_exists(tg, make_assi
     script.replies = ["Привет!"]
     assert sent(await send(lambda: tg.push_text(OWNER, "привет"))) == ["Привет!"]  # в личке работает
     await bot.session.close()
+
+
+
+async def test_bot_sleep_record_time_late_reports_and_no_data_days(tb, sessions) -> None:
+    """Бот засыпает: запись — по времени отправки; пропущенные отчёты приходят с пометкой;
+    дни, когда бот спал больше суток, не считаются днями без записей."""
+    send, tick, tg, svc, _a = tb
+    CLOCK.now = at(9, 0, d=2)  # пн 2.11: бот работает
+    await tick()
+    await send(gmsg(tg, IVAN, voice("Иван | A | ✅")))
+    await send(gmsg(tg, OLYA, voice("Оля | B | ✅"), name="Оля"))
+    await tick()
+    # Запись отправлена в 11:00 вт, а бот проснулся и обработал её только в 16:00.
+    CLOCK.now = at(11, 0, d=3)
+    push = gmsg(tg, IVAN, voice("Иван | C | ❌"))
+    push()
+    upd = tg.updates.get_nowait()
+    CLOCK.now = at(16, 0, d=3)
+    await send(lambda: tg.updates.put_nowait(upd))
+    rec = [r for r in await records(sessions) if r.client == "C"][0]
+    assert rec.created_at.replace(tzinfo=UTC) == at(11, 0, d=3)  # время отправки, а не обработки
+    # Бот спал со вт 16:00 до пт 13:00 (больше суток): ср и чт — «нет данных».
+    CLOCK.now = at(13, 0, d=6)
+    calls = await tick()
+    owner = sent(calls, chat=OWNER)
+    late = [x for x in owner if "с опозданием" in x]
+    assert [x.split(" (")[0] for x in late] == ["📊 Отчёт за 03.11.2026", "📊 Отчёт за 04.11.2026",
+                                                 "📊 Отчёт за 05.11.2026"]
+    assert "часть записей за этот день могла не дойти" in late[1]
+    assert not [x for x in sent(calls, chat=GROUP) if "Оля" in x]  # Олю не упрекаем за дни без данных
+    assert await svc.idle_workdays((await svc.find("Оля"))[0], date(2026, 11, 6), include_today=False) == 0
+    assert sent(await tick(), chat=OWNER) == []  # повторно не шлёт
+
+
+async def test_missed_weekly_report_comes_late(tb) -> None:
+    send, tick, tg, svc, _a = tb
+    CLOCK.now = at(10, 0, d=2)
+    await tick()
+    await send(gmsg(tg, IVAN, voice("Иван | A | ✅")))
+    CLOCK.now = at(9, 0, d=9)  # проспал воскресенье 8.11 20:00 — проснулся в понедельник утром
+    weekly = [x for x in sent(await tick(), chat=OWNER) if x.startswith("📈")]
+    assert len(weekly) == 1 and "02.11–08.11" in weekly[0] and "с опозданием" in weekly[0]

@@ -45,6 +45,7 @@ class TrainingScheduler:
         t = local.time()
         cfg = svc.config
 
+        await svc.note_alive()  # бот спал больше суток — эти дни помечаются «нет данных»
         quiet = await svc.silent()  # тихий режим: в группу и сотрудникам — ничего, отчёты владельцу — да
 
         # 1. Проверка: нет ни одной записи idle_days рабочих дней подряд (и сегодня пока тоже) —
@@ -83,15 +84,23 @@ class TrainingScheduler:
             if not (p.dm_ok and await self.sender.to_person(p.tg_id, text)) and group:
                 await self.sender.to_group(group, f"{mention(p)}, {text[0].lower()}{text[1:]}")
 
-        # 4. Дневной отчёт.
+        # 4. Дневной отчёт — и пропущенные, пока бот спал (до 3 дней назад, с пометкой).
+        started = await svc.started_day()
+        for back in (3, 2, 1):
+            d = day - timedelta(days=back)
+            if d >= started and d.weekday() in sched.work_days and await svc.claim("daily", str(d)):
+                await self.sender.to_owner(await reports.daily_report(svc, d, late=True))
         if workday and t >= sched.daily_report and await svc.claim("daily", str(day)):
             await self.sender.to_owner(await reports.daily_report(svc, day))
 
-        # 5. Недельный отчёт.
-        if local.weekday() == sched.weekly_report_day and t >= sched.weekly_report:
-            week = local.isocalendar()
+        # 5. Недельный отчёт — в свой день; проспал — в течение 3 суток, с пометкой.
+        back = (local.weekday() - sched.weekly_report_day) % 7
+        report_day = day - timedelta(days=back)
+        due = datetime.combine(report_day, sched.weekly_report, tzinfo=svc.tz)
+        if due <= local and local - due <= timedelta(hours=72) and report_day >= started:
+            week = report_day.isocalendar()
             if await svc.claim("weekly", f"{week.year}-W{week.week}"):
-                await self.sender.to_owner(await reports.weekly_report(svc, day))
+                await self.sender.to_owner(await reports.weekly_report(svc, report_day, late=report_day != day))
 
     async def run_forever(self, interval: float = 30.0) -> None:
         while True:

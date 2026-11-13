@@ -125,7 +125,7 @@ async def group_message(message: Message, bot: Bot, app: AppContext) -> None:
         kind, file_id = media
         cap = parse_caption(message.caption)
         rec = await svc.add_record(person, cap, kind=kind, file_id=file_id, chat_id=message.chat.id,
-                                   message_id=message.message_id, link=message_link(message))
+                                   message_id=message.message_id, link=message_link(message), sent_at=message.date)
         if await svc.silent():
             return  # тихий режим: записываем молча
         if rec.result is None:

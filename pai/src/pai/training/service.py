@@ -188,8 +188,11 @@ class TrainingService:
         return datetime.combine(d, t or sched.reschedule_default, tzinfo=self.tz).astimezone(UTC)
 
     async def add_record(self, person: TrainingPerson, cap: Caption, *, kind: str, file_id: str, chat_id: int,
-                         message_id: int, link: str | None) -> TrainingRecord:
-        created = self.now()
+                         message_id: int, link: str | None, sent_at: datetime | None = None) -> TrainingRecord:
+        # Время записи — когда сотрудник её отправил (бот мог спать и обработать позже).
+        now = self.now()
+        sent = _utc(sent_at)
+        created = sent if sent is not None and now - timedelta(hours=48) <= sent <= now else now
         sched = await self.schedule()
         async with self._sessions() as s, s.begin():
             existing = await s.scalar(select(TrainingRecord).where(TrainingRecord.chat_id == chat_id,
@@ -278,7 +281,7 @@ class TrainingService:
         for _ in range(90):
             if d < since:
                 break
-            if d.weekday() in sched.work_days and not await self.is_off(person.id, d):
+            if d.weekday() in sched.work_days and not await self.is_off(person.id, d) and not await self.no_data(d):
                 if await self.count_on(person.id, d):
                     break
                 count += 1
@@ -310,6 +313,39 @@ class TrainingService:
             for r in rows:
                 out.setdefault(r.person_id, []).append(r.text)
             return out
+
+    # ---- бот спал: дни без данных ----------------------------------------------------------
+
+    async def note_alive(self) -> list[date]:
+        """Отметка «бот работает». Если перерыв был больше суток, Telegram уже удалил часть
+        сообщений — дни этого перерыва помечаются «нет данных» (не считаются днями без записей).
+        Возвращает такие дни."""
+        now = self.now()
+        raw = await self._get_setting("last_alive")
+        await self._set_setting("last_alive", now.isoformat())
+        if raw is None:
+            if await self._get_setting("started") is None:
+                await self._set_setting("started", now.astimezone(self.tz).date().isoformat())
+            return []
+        last = datetime.fromisoformat(raw)
+        lost_until = now - timedelta(hours=24)  # сообщения новее этого Telegram ещё отдаст
+        if lost_until <= last:
+            return []
+        days = []
+        d = last.astimezone(self.tz).date()
+        end = lost_until.astimezone(self.tz).date()
+        while d <= end:
+            if await self.claim("nodata", d.isoformat()):
+                days.append(d)
+            d += timedelta(days=1)
+        return days
+
+    async def no_data(self, day: date) -> bool:
+        return await self.has_job("nodata", day.isoformat())
+
+    async def started_day(self) -> date:
+        raw = await self._get_setting("started")
+        return date.fromisoformat(raw) if raw else self.local_now().date()
 
     # ---- журнал проверок -------------------------------------------------------------------
 

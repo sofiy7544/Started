@@ -50,10 +50,12 @@ async def previous_workday(svc: TrainingService, day: date) -> date:
     return day - timedelta(days=1)
 
 
-async def daily_report(svc: TrainingService, day: date) -> str:
+async def daily_report(svc: TrainingService, day: date, *, late: bool = False) -> str:
     stats = await svc.stats(day, day)
     reasons = await svc.reasons_on(day)
-    lines = [f"📊 Отчёт за {day:%d.%m.%Y}"]
+    lines = [f"📊 Отчёт за {day:%d.%m.%Y}" + (" (с опозданием — бот был выключен)" if late else "")]
+    if await svc.no_data(day):
+        lines[0] += "\n⚠️ Бот был выключен больше суток — часть записей за этот день могла не дойти"
     if await svc.silent():
         lines[0] += "\n🔇 Тихий режим: в группе бот молчит (включить ответы — /silent off)"
     if not stats:
@@ -83,11 +85,11 @@ async def daily_report(svc: TrainingService, day: date) -> str:
     return "\n".join(lines)
 
 
-async def weekly_report(svc: TrainingService, last_day: date) -> str:
+async def weekly_report(svc: TrainingService, last_day: date, *, late: bool = False) -> str:
     start = last_day - timedelta(days=6)
     stats = await svc.stats(start, last_day)
     before = {s.person.id: s for s in await svc.stats(start - timedelta(days=7), start - timedelta(days=1))}
-    lines = [f"📈 Неделя {start:%d.%m}–{last_day:%d.%m}"]
+    lines = [f"📈 Неделя {start:%d.%m}–{last_day:%d.%m}" + (" (с опозданием — бот был выключен)" if late else "")]
     if not stats:
         return lines[0] + "\nСотрудников в списке пока нет."
     tot = sum(s.total for s in stats)
