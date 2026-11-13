@@ -196,34 +196,42 @@ async def test_owner_reply_scores_the_exact_record(tb, sessions) -> None:
 
 
 async def test_activity_check_reason_and_followup(tb, sessions) -> None:
+    """Правило: упоминание, только если нет ни одной записи 2 рабочих дня подряд; одна запись
+    за 2 дня — норма; одно упоминание на весь период без записей."""
     send, tick, tg, svc, _a = tb
-    CLOCK.now = at(10, 30)
+    CLOCK.now = at(10, 30)  # ср 4.11: все трое прислали записи
     for uid, name in ((IVAN, "Иван"), (OLYA, "Оля"), (PETYA, "Петя")):
         await send(gmsg(tg, uid, voice(f"{name} | клиент | ✅"), name=name))
-    CLOCK.now = at(10, 30, d=5)  # четверг: ещё никто ничего не прислал
+    CLOCK.now = at(10, 30, d=5)  # чт: только Иван
     await send(gmsg(tg, IVAN, voice("Иван | X | ✅")))
     petya = (await svc.find("Петя"))[0]
-    await svc.add_absence(petya.id, date(2026, 11, 5), date(2026, 11, 5))
+    await svc.add_absence(petya.id, date(2026, 11, 5), date(2026, 11, 7))  # Петя в отпуске чт–сб
     olya = (await svc.find("Оля"))[0]
     await svc.set_dm_ok(olya.id)
-    CLOCK.now = at(12, 59, d=5)
+    CLOCK.now = at(13, 0, d=6)  # пт: у Оли пустой только чт — это норма
     assert sent(await tick(), chat=GROUP) == []
-    CLOCK.now = at(13, 0, d=5)
+    CLOCK.now = at(12, 59, d=7)  # сб, до проверки
+    assert sent(await tick(), chat=GROUP) == []
+    CLOCK.now = at(13, 0, d=7)  # сб: у Оли пусто чт и пт; у Ивана пустая только пт
     pings = sent(await tick(), chat=GROUP)
-    assert len(pings) == 1 and "Оля" in pings[0] and "сегодня ещё нет записей" in pings[0]  # Иван прислал, Петя в отпуске
-    assert sent(await tick(), chat=GROUP) == []  # одно упоминание, без давления
-    CLOCK.now = at(14, 1, d=5)
-    dms = sent(await tick(), chat=OLYA)
-    assert dms == [svc.config.text("no_records_dm")]
+    assert len(pings) == 1 and "Оля" in pings[0] and "нет записей уже 2 рабочих дня" in pings[0]
+    assert sent(await tick(), chat=GROUP) == []  # одно упоминание
+    CLOCK.now = at(14, 1, d=7)
+    assert sent(await tick(), chat=OLYA) == [svc.config.text("no_records_dm")]
     calls = await send(lambda: tg.push_text(OLYA, "нет клиентов, база пустая", first_name="Оля"))
-    assert sent(calls, chat=OWNER) and "нет клиентов, база пустая" in sent(calls, chat=OWNER)[0]
+    assert "нет клиентов, база пустая" in sent(calls, chat=OWNER)[0]
     assert sent(calls, chat=OLYA) == [svc.config.text("reason_saved")]
-    CLOCK.now = at(19, 30, d=5)
+    CLOCK.now = at(19, 30, d=7)
     report = sent(await tick(), chat=OWNER)
     assert len(report) == 1
-    assert "Иван: 1 — ✅ закрыл 1" in report[0] and "Оля: 0 записей — нет клиентов, база пустая" in report[0]
-    assert "Петя: выходной/отпуск" in report[0] and "Оля: нет записей за весь день" in report[0]
+    assert "Оля: 0 записей — нет клиентов, база пустая" in report[0] and "Петя: выходной/отпуск" in report[0]
+    assert "Оля: нет записей 3 рабочих дня подряд" in report[0]
+    assert "Иван: нет записей 2 рабочих дня подряд, причину не сообщил" in report[0]  # пт и сб пусто
     assert sent(await tick(), chat=OWNER) == []  # отчёт не дублируется
+    CLOCK.now = at(13, 0, d=9)  # пн: Оля всё ещё молчит — повторно в группе не дёргаем
+    out = sent(await tick(), chat=GROUP)
+    assert not [x for x in out if "Оля" in x]
+    assert len([x for x in out if "Иван" in x]) == 1  # у Ивана теперь пусто пт и сб — 2 рабочих дня
 
 
 async def test_two_days_without_records_alert(tb, sessions) -> None:
@@ -297,7 +305,7 @@ async def test_owner_commands(tb, sessions) -> None:
     assert "Иван, 20.11–22.11" in sent(await send(o("/off Иван 20.11-22.11")))[0]
     assert await svc.is_off((await svc.find("Иван"))[0].id, date(2026, 11, 21))
     out = sent(await send(o("/schedule check 12:30")))[0]
-    assert "Первая проверка: 12:30" in out and (await svc.schedule()).first_check.hour == 12
+    assert "Проверка: 12:30" in out and (await svc.schedule()).first_check.hour == 12
     assert "Рабочие дни: пн, вт, ср, чт, пт" in sent(await send(o("/schedule days пн-пт")))[0]
     calls = await send(o("/announce Завтра собрание в 10:00"))
     assert sent(calls, chat=GROUP) == ["Завтра собрание в 10:00"]
@@ -359,3 +367,17 @@ async def test_bind_group_and_ignore_other_groups(tg, make_assistant, sessions) 
     assert await svc.group_id() == GROUP
     assert [m for m, _ in await send(gmsg(tg, IVAN, voice("Иван | A | ✅"))) if m == "setMessageReaction"]
     await bot.session.close()
+
+
+async def test_members_are_registered_by_any_message_join_and_leave(tb) -> None:
+    send, _t, tg, svc, _a = tb
+    await send(gmsg(tg, IVAN, {"text": "всем привет"}))  # просто написал — уже в списке
+    await send(gmsg(tg, OWNER, {"new_chat_members": [{"id": OLYA, "is_bot": False, "first_name": "Оля"},
+                                                      {"id": 42, "is_bot": True, "first_name": "Бот"}]}, name="Владелец"))
+    assert sorted(p.name for p in await svc.employees()) == ["Иван", "Оля"]
+    await send(gmsg(tg, OLYA, {"left_chat_member": {"id": OLYA, "is_bot": False, "first_name": "Оля"}}, name="Оля"))
+    assert [p.name for p in await svc.employees()] == ["Иван"]
+    ivan = (await svc.find("Иван"))[0]
+    await svc.set_employee(ivan.id, False)  # владелец убрал (/remove)
+    await send(gmsg(tg, IVAN, voice("Иван | A | ✅")))
+    assert await svc.employees() == []  # после /remove автоматически не возвращается

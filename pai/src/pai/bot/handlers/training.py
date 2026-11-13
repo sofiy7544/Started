@@ -17,7 +17,7 @@ from aiogram import Bot, F, Router
 from aiogram.enums import ChatType
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandObject, Filter
-from aiogram.types import Message, ReactionTypeEmoji
+from aiogram.types import ChatMemberUpdated, Message, ReactionTypeEmoji
 
 from pai.bot.app import AppContext, OwnerOnly, is_owner, split_message
 from pai.training import reports
@@ -96,10 +96,22 @@ async def group_message(message: Message, bot: Bot, app: AppContext) -> None:
         return
     if message.chat.id != await svc.group_id():
         return  # чужие группы — молча игнорируем
+    # Вступили / вышли — запоминаем (Telegram не даёт боту список участников группы).
+    if message.new_chat_members or message.left_chat_member:
+        for m in message.new_chat_members or []:
+            if not m.is_bot and not is_owner(app, m.id):
+                await svc.touch(m.id, " ".join(x for x in (m.first_name, m.last_name) if x), m.username, employee=True)
+        left = message.left_chat_member
+        if left is not None and not left.is_bot:
+            p = await svc.person_by_tg(left.id)
+            if p is not None:
+                await svc.set_employee(p.id, False, by_owner=False)
+        return
     if is_owner(app, u.id):
         await _owner_in_group(message, bot, app)
         return
-    person = await svc.touch(u.id, _display_name(message), u.username)
+    # Любой участник, написавший в группе, — в списке сотрудников (если владелец его не убирал).
+    person = await svc.touch(u.id, _display_name(message), u.username, employee=True)
     media = record_media(message)
     cfg = svc.config
     if media is not None:
@@ -157,6 +169,23 @@ async def _owner_in_group(message: Message, bot: Bot, app: AppContext) -> None:
         await bot.set_message_reaction(message.chat.id, message.message_id, reaction=[ReactionTypeEmoji(emoji="✍")])
     except TelegramAPIError:
         pass
+
+
+async def member_update(event: ChatMemberUpdated, app: AppContext) -> None:
+    """Вступление/выход участника (приходит, если бот — админ группы)."""
+    svc = app.training
+    if event.chat.id != await svc.group_id():
+        return
+    u = event.new_chat_member.user
+    if u.is_bot or is_owner(app, u.id):
+        return
+    status = event.new_chat_member.status
+    if status in ("member", "restricted", "administrator", "creator"):
+        await svc.touch(u.id, " ".join(x for x in (u.first_name, u.last_name) if x), u.username, employee=True)
+    elif status in ("left", "kicked"):
+        p = await svc.person_by_tg(u.id)
+        if p is not None:
+            await svc.set_employee(p.id, False, by_owner=False)
 
 
 async def group_edited(message: Message, bot: Bot, app: AppContext) -> None:
@@ -321,7 +350,7 @@ async def cmd_schedule(message: Message, command: CommandObject, app: AppContext
     svc = app.training
     args = (command.args or "").strip().lower()
     usage = ("\n\nИзменить:\n/schedule hours 10:00-19:00\n/schedule days пн-сб (или пн,вт,чт)\n/schedule check 13:00\n"
-             "/schedule followup 60\n/schedule daily 19:30\n/schedule weekly вс 20:00")
+             "/schedule idle 2 (дней без записей до упоминания)\n/schedule followup 60\n/schedule daily 19:30\n/schedule weekly вс 20:00")
     if not args:
         await message.answer((await svc.schedule()).describe() + usage)
         return
@@ -339,6 +368,8 @@ async def cmd_schedule(message: Message, command: CommandObject, app: AppContext
                 changes = {"work_days": [_DAYS[d.strip()] for d in re.split(r"[,\s]+", value) if d.strip()]}
         elif key == "check":
             changes = {"first_check": value}
+        elif key == "idle":
+            changes = {"idle_days": int(value)}
         elif key == "followup":
             changes = {"followup_minutes": int(value)}
         elif key == "daily":
@@ -390,6 +421,7 @@ def create_router() -> Router:
     r.message.register(cmd_announce, *owner_private, Command("announce"))
     r.message.register(group_message, F.chat.type.in_(GROUPS))
     r.edited_message.register(group_edited, F.chat.type.in_(GROUPS))
+    r.chat_member.register(member_update, F.chat.type.in_(GROUPS))
     r.message.register(employee_private, F.chat.type == ChatType.PRIVATE, NotOwner())
     return r
 

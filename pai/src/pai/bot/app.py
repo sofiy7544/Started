@@ -94,6 +94,8 @@ class AccessMiddleware(BaseMiddleware):
     ) -> Any:
         if not isinstance(event, Update):
             return await handler(event, data)
+        if event.chat_member is not None:  # вступил/вышел из группы — только модулю обучения
+            return await handler(event, data) if self._training is not None else None
         sender = _sender_id(event)
         if sender in self._allowed:
             return await handler(event, data)

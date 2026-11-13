@@ -345,6 +345,8 @@ class TrainingPerson(Base):
     username: Mapped[str | None] = mapped_column(String(64))
     is_employee: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     dm_ok: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Убран владельцем (/remove) — автоматически в список больше не попадает.
+    excluded: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

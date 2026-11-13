@@ -28,6 +28,7 @@ class Schedule:
     work_end: time = time(19, 0)
     work_days: tuple[int, ...] = (0, 1, 2, 3, 4, 5)
     first_check: time = time(13, 0)
+    idle_days: int = 2
     followup_minutes: int = 60
     daily_report: time = time(19, 30)
     weekly_report_day: int = 6
@@ -36,7 +37,7 @@ class Schedule:
 
     def as_dict(self) -> dict:
         return {"work_start": f"{self.work_start:%H:%M}", "work_end": f"{self.work_end:%H:%M}",
-                "work_days": list(self.work_days), "first_check": f"{self.first_check:%H:%M}",
+                "work_days": list(self.work_days), "first_check": f"{self.first_check:%H:%M}", "idle_days": self.idle_days,
                 "followup_minutes": self.followup_minutes, "daily_report": f"{self.daily_report:%H:%M}",
                 "weekly_report_day": self.weekly_report_day, "weekly_report": f"{self.weekly_report:%H:%M}",
                 "reschedule_default": f"{self.reschedule_default:%H:%M}"}
@@ -53,6 +54,8 @@ class Schedule:
             if not days:
                 raise ConfigError("нужен хотя бы один рабочий день")
             upd["work_days"] = days
+        if "idle_days" in data:
+            upd["idle_days"] = max(1, min(int(data["idle_days"]), 30))
         if "followup_minutes" in data:
             upd["followup_minutes"] = max(5, min(int(data["followup_minutes"]), 600))
         if "weekly_report_day" in data:
@@ -62,7 +65,7 @@ class Schedule:
     def describe(self) -> str:
         days = ", ".join(WEEKDAY_SHORT[d] for d in self.work_days)
         return (f"Рабочие часы: {self.work_start:%H:%M}–{self.work_end:%H:%M}\nРабочие дни: {days}\n"
-                f"Первая проверка: {self.first_check:%H:%M}\nЛичка, если нет ответа: через {self.followup_minutes} мин\n"
+                f"Проверка: {self.first_check:%H:%M} — упоминание, если нет записей {self.idle_days} раб. дн. подряд\nЛичка, если нет ответа: через {self.followup_minutes} мин\n"
                 f"Дневной отчёт: {self.daily_report:%H:%M}\n"
                 f"Недельный отчёт: {WEEKDAY_SHORT[self.weekly_report_day]} {self.weekly_report:%H:%M}\n"
                 f"Перенос без времени — напоминание в {self.reschedule_default:%H:%M}")

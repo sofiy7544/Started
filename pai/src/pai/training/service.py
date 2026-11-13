@@ -113,8 +113,9 @@ class TrainingService:
 
     # ---- участники -------------------------------------------------------------------------
 
-    async def touch(self, tg_id: int, name: str, username: str | None) -> TrainingPerson:
-        """Запомнить участника группы (имя и @ обновляются)."""
+    async def touch(self, tg_id: int, name: str, username: str | None, *, employee: bool = False) -> TrainingPerson:
+        """Запомнить участника группы (имя и @ обновляются). employee=True — сразу в список
+        сотрудников, если владелец его не убирал (/remove)."""
         for _ in range(2):
             try:
                 async with self._sessions() as s, s.begin():
@@ -127,6 +128,8 @@ class TrainingService:
                     else:
                         p.name = name[:100] or p.name
                         p.username = username or p.username
+                    if employee and not p.excluded:
+                        p.is_employee = True
                     return p
             except IntegrityError:
                 continue
@@ -136,11 +139,13 @@ class TrainingService:
         async with self._sessions() as s:
             return await s.scalar(select(TrainingPerson).where(TrainingPerson.tg_id == tg_id))
 
-    async def set_employee(self, person_id: int, value: bool) -> None:
+    async def set_employee(self, person_id: int, value: bool, *, by_owner: bool = True) -> None:
         async with self._sessions() as s, s.begin():
             p = await s.get(TrainingPerson, person_id)
             if p is not None:
                 p.is_employee = value
+                if by_owner:
+                    p.excluded = not value  # /remove — больше не добавлять автоматически
 
     async def set_dm_ok(self, person_id: int) -> None:
         async with self._sessions() as s, s.begin():
@@ -191,9 +196,10 @@ class TrainingService:
             )
             s.add(rec)
             await s.flush()
-            if cap.complete and not person.is_employee:
+            if not person.is_employee:
                 p = await s.get(TrainingPerson, person.id)
-                p.is_employee = True  # первая подписанная запись — человек в списке сотрудников
+                if not p.excluded:
+                    p.is_employee = True  # прислал запись — сотрудник
             return rec
 
     async def update_caption(self, chat_id: int, message_id: int, cap: Caption) -> TrainingRecord | None:
@@ -207,8 +213,6 @@ class TrainingService:
             rec.caption_name, rec.client, rec.result = cap.name, cap.client, cap.result
             rec.reschedule_text = cap.reschedule_text
             rec.reschedule_at = self._reschedule_at(cap, _utc(rec.created_at), sched)
-            p = await s.get(TrainingPerson, rec.person_id)
-            p.is_employee = True
             return rec
 
     async def record_by_message(self, chat_id: int, message_id: int) -> TrainingRecord | None:
@@ -240,6 +244,11 @@ class TrainingService:
                 TrainingRecord.person_id == person_id, TrainingRecord.created_at >= start,
                 TrainingRecord.created_at < end)) or 0
 
+    async def last_record_day(self, person_id: int) -> date | None:
+        async with self._sessions() as s:
+            last = await s.scalar(select(func.max(TrainingRecord.created_at)).where(TrainingRecord.person_id == person_id))
+        return _utc(last).astimezone(self.tz).date() if last else None
+
     async def due_reschedules(self, now: datetime) -> list[tuple[TrainingRecord, TrainingPerson]]:
         local_day = now.astimezone(self.tz).date()
         start, _ = self.day_bounds(local_day)
@@ -250,6 +259,23 @@ class TrainingService:
                        TrainingRecord.reschedule_at <= now, TrainingRecord.reschedule_at >= start)
             )
             return [(r, p) for r, p in rows.all()]
+
+    async def idle_workdays(self, person: TrainingPerson, day: date, *, include_today: bool) -> int:
+        """Сколько рабочих дней подряд (без выходных и отпусков) нет ни одной записи — считая назад от
+        вчера (или от сегодня). Дни до появления человека в группе не считаются."""
+        sched = await self.schedule()
+        since = _utc(person.created_at).astimezone(self.tz).date()
+        d = day if include_today else day - timedelta(days=1)
+        count = 0
+        for _ in range(90):
+            if d < since:
+                break
+            if d.weekday() in sched.work_days and not await self.is_off(person.id, d):
+                if await self.count_on(person.id, d):
+                    break
+                count += 1
+            d -= timedelta(days=1)
+        return count
 
     # ---- отсутствия и причины --------------------------------------------------------------
 

@@ -11,6 +11,7 @@ from html import escape
 from typing import Protocol
 
 from pai.training import reports
+from pai.training.reports import workdays_text
 from pai.training.service import TrainingService
 
 log = logging.getLogger(__name__)
@@ -44,14 +45,21 @@ class TrainingScheduler:
         t = local.time()
         cfg = svc.config
 
-        # 1. Проверка: к first_check у сотрудника нет записей — одно упоминание в группе.
+        # 1. Проверка: нет ни одной записи idle_days рабочих дней подряд (и сегодня пока тоже) —
+        #    одно упоминание в группе на весь такой период. Одна запись за эти дни — норма.
         if group and workday and sched.first_check <= t < sched.work_end:
             for p in await svc.employees():
                 if await svc.is_off(p.id, day) or await svc.count_on(p.id, day):
                     continue
-                if await svc.claim("ping", f"{day}:{p.id}"):
-                    await self.sender.to_group(group, escape(cfg.text("no_records_group", name="{name}")).replace(
-                        "{name}", mention(p)))
+                idle = await svc.idle_workdays(p, day, include_today=False)
+                if idle < sched.idle_days:
+                    continue
+                last = await svc.last_record_day(p.id) or "never"
+                if not await svc.claim("streak", f"{p.id}:{last}"):
+                    continue  # по этому периоду уже упоминали — без лишнего давления
+                await svc.claim("ping", f"{day}:{p.id}")
+                text = escape(cfg.text("no_records_group", name="{name}", days=workdays_text(idle)))
+                await self.sender.to_group(group, text.replace("{name}", mention(p)))
 
         # 2. Нет ответа и записей за followup_minutes после упоминания — в личку (если запускал бота).
         if workday:

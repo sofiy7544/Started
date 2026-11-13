@@ -9,6 +9,12 @@ from pai.training.parser import RESULT_TITLES, RESULTS
 from pai.training.service import PersonStats, TrainingService
 
 
+def workdays_text(n: int) -> str:
+    word = "рабочий день" if n % 10 == 1 and n % 100 != 11 else (
+        "рабочих дня" if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14) else "рабочих дней")
+    return f"{n} {word}"
+
+
 def _results_line(st: PersonStats) -> str:
     parts = [f"{RESULT_TITLES[r]} {st.by_result[r]}" for r in RESULTS if st.by_result.get(r)]
     if st.unsigned:
@@ -47,8 +53,6 @@ async def previous_workday(svc: TrainingService, day: date) -> date:
 async def daily_report(svc: TrainingService, day: date) -> str:
     stats = await svc.stats(day, day)
     reasons = await svc.reasons_on(day)
-    prev = await previous_workday(svc, day)
-    prev_stats = {s.person.id: s for s in await svc.stats(prev, prev)}
     lines = [f"📊 Отчёт за {day:%d.%m.%Y}"]
     if not stats:
         return lines[0] + "\nСотрудников в списке пока нет — они появятся после первой записи в группе."
@@ -64,13 +68,12 @@ async def daily_report(svc: TrainingService, day: date) -> str:
         if st.total:
             lines.append(f"\n• {name}: {st.total} — {_results_line(st)}")
         else:
-            why = "; ".join(escape(r) for r in reasons.get(st.person.id, [])) or "причину не сообщил"
-            lines.append(f"\n• {name}: 0 записей — {why}")
-            p = prev_stats.get(st.person.id)
-            if p is not None and p.total == 0 and not await svc.is_off(st.person.id, prev):
-                warnings.append(f"⚠️ {name}: нет записей 2 рабочих дня подряд")
-            else:
-                warnings.append(f"⚠️ {name}: нет записей за весь день")
+            why = "; ".join(escape(r) for r in reasons.get(st.person.id, []))
+            lines.append(f"\n• {name}: 0 записей" + (f" — {why}" if why else ""))
+            idle = await svc.idle_workdays(st.person, day, include_today=True)
+            if idle >= (await svc.schedule()).idle_days:
+                warnings.append(f"⚠️ {name}: нет записей {workdays_text(idle)} подряд"
+                                + ("" if why else ", причину не сообщил"))
         if st.unsigned:
             lines.append(f"   записей без подписи: {st.unsigned}")
     if warnings:
