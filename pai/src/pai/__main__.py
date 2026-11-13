@@ -184,7 +184,9 @@ async def run_group(settings: Settings) -> None:
         await bot.delete_webhook(drop_pending_updates=False)
         log.info("бот рабочей группы @%s запущен; тихий режим: %s; группа: %s",
                  me.username, await training.silent(), await training.group_id() or "не подключена")
-        await dp.start_polling(bot, allowed_updates=["message", "edited_message", "chat_member"])
+        await dp.start_polling(
+            bot, allowed_updates=["message", "edited_message", "chat_member", "my_chat_member"]
+        )
     finally:
         if loop_task is not None:
             loop_task.cancel()

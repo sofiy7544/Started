@@ -113,6 +113,8 @@ class AccessMiddleware(BaseMiddleware):
                     except Exception:  # noqa: BLE001
                         log.warning("could not leave group %s", chat.id)
                 return None
+        if event.my_chat_member is not None:  # бота добавили/повысили в группе — только модулю обучения
+            return await handler(event, data) if self._training is not None else None
         if event.chat_member is not None:  # вступил/вышел из группы — только модулю обучения
             return await handler(event, data) if self._training is not None else None
         sender = _sender_id(event)

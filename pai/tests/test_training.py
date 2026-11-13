@@ -541,3 +541,38 @@ async def test_missed_weekly_report_comes_late(tb) -> None:
     CLOCK.now = at(9, 0, d=9)  # проспал воскресенье 8.11 20:00 — проснулся в понедельник утром
     weekly = [x for x in sent(await tick(), chat=OWNER) if x.startswith("📈")]
     assert len(weekly) == 1 and "02.11–08.11" in weekly[0] and "с опозданием" in weekly[0]
+
+
+async def test_group_is_bound_automatically_when_owner_adds_bot(tg, make_assistant, sessions) -> None:
+    assistant = make_assistant()
+    svc = TrainingService(sessions, load_training_config(), now=lambda: CLOCK.now)
+    bot = Bot("123456:TEST", session=AiohttpSession(api=TelegramAPIServer.from_base(tg.url)))
+    dp = build_dispatcher(AppContext(assistant._settings, assistant, sessions, training=svc))
+
+    def added(by: int, status: str, chat: int = GROUP, uid: int = 8000) -> dict:
+        return {"update_id": uid, "my_chat_member": {
+            "chat": {"id": chat, "type": "supergroup", "title": "Колл-центр"}, "date": 1,
+            "from": {"id": by, "is_bot": False, "first_name": "X"},
+            "old_chat_member": {"status": "left", "user": {"id": 42, "is_bot": True, "first_name": "Bot"}},
+            "new_chat_member": {"status": status, "user": {"id": 42, "is_bot": True, "first_name": "Bot"},
+                                **({"can_be_edited": False, "is_anonymous": False, "can_manage_chat": True,
+                                    "can_delete_messages": True, "can_manage_video_chats": True,
+                                    "can_restrict_members": True, "can_promote_members": False,
+                                    "can_change_info": True, "can_invite_users": True, "can_post_stories": False,
+                                    "can_edit_stories": False, "can_delete_stories": False,
+                                    "can_send_welcome_messages": False}
+                                   if status == "administrator" else {})}}}
+
+    async def feed(update: dict) -> list:
+        before = len(tg.calls)
+        await dp.feed_raw_update(bot, update)
+        return tg.calls[before:]
+
+    assert sent(await feed(added(IVAN, "member", uid=8001))) == []  # добавил не владелец — не подключаемся
+    assert await svc.group_id() is None
+    out = sent(await feed(added(OWNER, "administrator", uid=8002)))
+    assert await svc.group_id() == GROUP
+    assert len(out) == 1 and "Подключился к группе «Колл-центр»: администратор" in out[0] and "Тихий режим" in out[0]
+    assert sent(await feed(added(OWNER, "member", chat=-777, uid=8003)))[0].startswith("Меня добавили в другую группу")
+    assert await svc.group_id() == GROUP
+    await bot.session.close()

@@ -200,6 +200,27 @@ async def member_update(event: ChatMemberUpdated, app: AppContext) -> None:
             await svc.set_employee(p.id, False, by_owner=False)
 
 
+async def bot_added(event: ChatMemberUpdated, bot: Bot, app: AppContext) -> None:
+    """Бота добавил в группу владелец — подключаем группу сразу (без /bind) и сообщаем владельцу."""
+    svc = app.training
+    status = event.new_chat_member.status
+    if event.chat.type not in ("group", "supergroup") or not is_owner(app, event.from_user.id):
+        return
+    if status not in ("member", "administrator"):
+        return
+    first = await svc.group_id() is None
+    if first or await svc.group_id() == event.chat.id:
+        await svc.set_group(event.chat.id)
+        title = f" «{escape(event.chat.title)}»" if event.chat.title else ""
+        sees = "администратор — вижу все сообщения" if status == "administrator" else (
+            "но я не админ: без прав админа (или с включённым Privacy Mode) я не вижу сообщения — сделайте меня админом")
+        quiet = " Тихий режим включён: в группе молчу." if await svc.silent() else ""
+        await _to_owner(bot, app, f"Подключился к группе{title}: {sees}.{quiet}")
+    else:
+        await _to_owner(bot, app, "Меня добавили в другую группу. Рабочая группа уже подключена; чтобы сменить её, "
+                                  "напишите /bind в новой группе.")
+
+
 async def group_edited(message: Message, bot: Bot, app: AppContext) -> None:
     """Сотрудник дописал подпись правкой сообщения."""
     svc = app.training
@@ -469,6 +490,7 @@ def create_router() -> Router:
     r.message.register(group_message, F.chat.type.in_(GROUPS))
     r.edited_message.register(group_edited, F.chat.type.in_(GROUPS))
     r.chat_member.register(member_update, F.chat.type.in_(GROUPS))
+    r.my_chat_member.register(bot_added, F.chat.type.in_(GROUPS))
     r.message.register(employee_private, F.chat.type == ChatType.PRIVATE, NotOwner())
     return r
 
