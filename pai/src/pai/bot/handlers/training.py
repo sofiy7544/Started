@@ -497,6 +497,30 @@ class SilenceGuard(BaseRequestMiddleware):
         return await make_request(bot, method)
 
 
+OWNER_HELP = ("Это бот рабочей группы (контроль записей сотрудников). Личный ассистент — в другом боте.\n\n"
+              "Команды: /today, /week, /employee Имя, /staff, /add, /remove, /off Имя даты, /schedule, "
+              "/announce текст, /silent on|off.\nПодключить группу: сделайте бота админом и напишите в группе /bind.")
+
+
+async def owner_help(message: Message, bot: Bot) -> None:
+    from aiogram.types import BotCommandScopeChat
+
+    from pai.bot.app import TRAINING_COMMANDS
+
+    await message.answer(OWNER_HELP)
+    try:  # меню команд владельцу — после первого Start (раньше Telegram не даёт)
+        await bot.set_my_commands(TRAINING_COMMANDS, scope=BotCommandScopeChat(chat_id=message.chat.id))
+    except TelegramAPIError:
+        pass
+
+
+def create_owner_help_router() -> Router:
+    """Для отдельного бота группы: на всё прочее от владельца в личке — подсказка по командам."""
+    r = Router(name="training_owner_help")
+    r.message.register(owner_help, F.chat.type == ChatType.PRIVATE, OwnerOnly())
+    return r
+
+
 class TrainingTelegramSender:
     """Отправка для планировщика: группа, владелец, сотрудник в личку."""
 

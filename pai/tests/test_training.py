@@ -444,3 +444,29 @@ async def test_guard_blocks_anything_to_group_in_silent_mode(tb) -> None:
     await bot.send_message(OWNER, "а владельцу — можно")
     await bot.session.close()
     assert [int(p["chat_id"]) for m, p in tg.calls[before:] if m == "sendMessage"] == [OWNER]
+
+
+async def test_separate_group_bot_has_no_personal_assistant(tg, settings, sessions, script) -> None:
+    """Отдельный бот группы: только контроль обучения; личного ассистента и ИИ в нём нет вовсе."""
+    from pai.bot.app import build_training_dispatcher
+
+    svc = TrainingService(sessions, load_training_config(), now=lambda: CLOCK.now)
+    await svc.set_group(GROUP)
+    bot = Bot("123456:TEST", session=AiohttpSession(api=TelegramAPIServer.from_base(tg.url)))
+    bot.session.middleware(SilenceGuard(svc, {OWNER}))
+    dp = build_training_dispatcher(AppContext(settings, None, sessions, training=svc))  # type: ignore[arg-type]
+
+    async def send(push) -> list:
+        before = len(tg.calls)
+        push()
+        await dp.feed_raw_update(bot, tg.updates.get_nowait())
+        return tg.calls[before:]
+
+    CLOCK.now = at(11)
+    assert [p for m, p in await send(gmsg(tg, IVAN, voice("Иван | A | ✅"))) if "chat_id" in p and int(p["chat_id"]) != OWNER] == []
+    assert "Иван: 1 — ✅ закрыл 1" in sent(await send(lambda: tg.push_text(OWNER, "/today")))[0]
+    help_text = sent(await send(lambda: tg.push_text(OWNER, "привет, что у меня в задачах?")))[0]
+    assert "бот рабочей группы" in help_text and "Личный ассистент — в другом боте" in help_text
+    assert sent(await send(lambda: tg.push_text(IVAN, "/tasks")), chat=IVAN) == []  # тихий режим
+    assert script.seen == []  # ИИ не вызывался ни разу
+    await bot.session.close()

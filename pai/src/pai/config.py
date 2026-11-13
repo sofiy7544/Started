@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     models_file: Path = PROJECT_ROOT / "config" / "models.toml"
     instructions_file: Path = PROJECT_ROOT / "config" / "assistant.md"
     telegram_api_url: str | None = None  # свой Bot API сервер (обычно не нужен)
+    # Отдельный бот для рабочей группы (контроль обучения): свой токен и своя база — к личным
+    # данным владельца (переписка, память, задачи) у него нет доступа. Запуск: python -m pai group
+    training_bot_token: SecretStr | None = None
+    training_database_url: str = f"sqlite+aiosqlite:///{(PROJECT_ROOT / 'data' / 'training.db').as_posix()}"
 
     # --- расходы ---
     monthly_budget_usd: float = Field(10.0, ge=0)

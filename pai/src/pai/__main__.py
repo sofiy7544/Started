@@ -8,7 +8,7 @@ import sys
 
 from aiogram import Bot
 from aiogram.client.telegram import TelegramAPIServer
-from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
+from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError, TelegramUnauthorizedError
 from sqlalchemy.exc import SQLAlchemyError
 
 from pai.bot import texts
@@ -111,7 +111,9 @@ async def run(settings: Settings, *, engine: ChatEngine | None = None, verify: b
         from pai.training.service import TrainingService
 
         tcfg = load_training_config()
-        training = TrainingService(sessions, tcfg) if tcfg.enabled else None
+        # Если для группы есть отдельный бот (TRAINING_BOT_TOKEN), личный бот группой не занимается.
+        use_here = tcfg.enabled and not settings.training_bot_token
+        training = TrainingService(sessions, tcfg) if use_here else None
         if training is not None:
             from pai.bot.handlers.training import SilenceGuard
 
@@ -141,13 +143,61 @@ async def run(settings: Settings, *, engine: ChatEngine | None = None, verify: b
         await sql.dispose()
 
 
+async def run_group(settings: Settings) -> None:
+    """Отдельный бот рабочей группы: только контроль обучения, своя база, без ИИ и личных данных."""
+    from pai.bot.app import build_training_dispatcher
+    from pai.bot.handlers.training import SilenceGuard, TrainingTelegramSender
+    from pai.training.config import load_training_config
+    from pai.training.scheduler import TrainingScheduler
+    from pai.training.service import TrainingService
+
+    if not settings.training_bot_token:
+        raise ConfigError("не задан TRAINING_BOT_TOKEN — токен бота для рабочей группы")
+    tcfg = load_training_config()
+    await db.upgrade(settings.training_database_url)
+    sql = db.make_engine(settings.training_database_url)
+    sessions = db.make_sessionmaker(sql)
+    bot = Bot(settings.training_bot_token.get_secret_value(), session=EnvAwareSession())
+    owners = set(settings.allowed_telegram_ids)
+    training = TrainingService(sessions, tcfg)
+    bot.session.middleware(SilenceGuard(training, owners))
+    loop_task: asyncio.Task[None] | None = None
+    try:
+        try:
+            me = await bot.get_me()
+        except TelegramUnauthorizedError as exc:
+            raise ConfigError("Telegram отклонил TRAINING_BOT_TOKEN — проверьте токен у @BotFather") from exc
+        sender = TrainingTelegramSender(bot, settings.allowed_telegram_ids[0])
+        loop_task = asyncio.create_task(TrainingScheduler(training, sender).run_forever())
+        dp = build_training_dispatcher(AppContext(settings, None, sessions, training=training))  # type: ignore[arg-type]
+        from aiogram.types import BotCommandScopeChat
+
+        from pai.bot.app import EMPLOYEE_COMMANDS, TRAINING_COMMANDS
+
+        await bot.set_my_commands(EMPLOYEE_COMMANDS)
+        for owner in owners:
+            try:
+                await bot.set_my_commands(TRAINING_COMMANDS, scope=BotCommandScopeChat(chat_id=owner))
+            except TelegramBadRequest:
+                log.warning("владелец ещё не нажал Start у бота группы — меню и отчёты появятся после этого")
+        await bot.delete_webhook(drop_pending_updates=False)
+        log.info("бот рабочей группы @%s запущен; тихий режим: %s; группа: %s",
+                 me.username, await training.silent(), await training.group_id() or "не подключена")
+        await dp.start_polling(bot, allowed_updates=["message", "edited_message", "chat_member"])
+    finally:
+        if loop_task is not None:
+            loop_task.cancel()
+        await bot.session.close()
+        await sql.dispose()
+
+
 def main() -> None:
     command = sys.argv[1] if len(sys.argv) > 1 else "run"
     if command == "doctor":
         doctor.main()
         return
-    if command not in ("run", "backup"):
-        print("Использование: python -m pai [run | doctor | backup]", file=sys.stderr)
+    if command not in ("run", "backup", "group"):
+        print("Использование: python -m pai [run | group | doctor | backup]", file=sys.stderr)
         sys.exit(2)
     try:
         settings = load_settings()
@@ -160,7 +210,7 @@ def main() -> None:
         print(f"Резервная копия: {path}" if path else "Копия не нужна: база не SQLite или ещё не создана.")
         return
     try:
-        asyncio.run(run(settings))
+        asyncio.run(run_group(settings) if command == "group" else run(settings))
     except ConfigError as exc:
         print(f"Ошибка настройки: {exc}", file=sys.stderr)
         sys.exit(2)

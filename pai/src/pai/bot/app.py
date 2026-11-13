@@ -234,12 +234,31 @@ EMPLOYEE_COMMANDS = [
 ]
 
 
+def build_training_dispatcher(app: AppContext) -> Dispatcher:
+    """Диспетчер отдельного бота рабочей группы: только контроль обучения, без личного ассистента."""
+    from pai.bot.handlers import training
+
+    dp = Dispatcher(storage=MemoryStorage(), app=app)
+    dp.update.outer_middleware(AccessMiddleware(set(app.settings.allowed_telegram_ids), app.sessions,
+                                                training=app.training))
+    dp.update.outer_middleware(DedupMiddleware(app.sessions))
+    dp.errors.register(on_error)
+    dp.include_router(training.create_router())
+    dp.include_router(training.create_owner_help_router())
+    return dp
+
+
 async def set_commands(bot: Bot, owner_ids: list[int] | None = None, training: bool = False) -> None:
     """Меню команд: владельцу — всё, остальным (сотрудникам) — только /my и /tips."""
     from aiogram.types import BotCommandScopeChat
 
     if not training or not owner_ids:
         await bot.set_my_commands(COMMANDS)
+        for owner in owner_ids or []:  # убрать меню обучения, если раньше было (теперь — отдельный бот)
+            try:
+                await bot.delete_my_commands(scope=BotCommandScopeChat(chat_id=owner))
+            except Exception:  # noqa: BLE001 — меню не критично для запуска
+                pass
         return
     await bot.set_my_commands(EMPLOYEE_COMMANDS)
     for owner in owner_ids:
