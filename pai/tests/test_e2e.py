@@ -50,14 +50,15 @@ async def test_full_run_and_restart(settings, tmp_path) -> None:
                 task.result()
             tg.push_text(STRANGER, "привет")
             tg.push_text(OWNER, "/start")
-            await wait_for(lambda: len(tg.sent_texts(OWNER)) >= 1 and len(tg.sent_texts(STRANGER)) >= 1)
+            await wait_for(lambda: len(tg.sent_texts(OWNER)) >= 1)
             tg.push_text(OWNER, "привет, я Петя")
             await wait_for(lambda: "Привет! Чем помочь?" in tg.sent_texts(OWNER))
         async with running(s, script):  # перезапуск: контекст из базы
             tg.push_text(OWNER, "как меня зовут?")
             await wait_for(lambda: "Вас зовут Петя." in tg.sent_texts(OWNER))
         assert script.seen[-1].user_prompts == ["привет, я Петя", "как меня зовут?"]
-        assert tg.sent_texts(STRANGER) == ["🔒 Это личный бот. Доступ закрыт."]
+        # Тихий режим контроля обучения (по умолчанию): посторонним бот ничего не отвечает.
+        assert tg.sent_texts(STRANGER) == []
         assert len(script.seen) == 2
     finally:
         await tg.stop()

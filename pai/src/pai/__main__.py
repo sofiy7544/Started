@@ -113,6 +113,9 @@ async def run(settings: Settings, *, engine: ChatEngine | None = None, verify: b
         tcfg = load_training_config()
         training = TrainingService(sessions, tcfg) if tcfg.enabled else None
         if training is not None:
+            from pai.bot.handlers.training import SilenceGuard
+
+            bot.session.middleware(SilenceGuard(training, set(settings.allowed_telegram_ids)))
             sender_t = TrainingTelegramSender(bot, settings.allowed_telegram_ids[0])
             loops.append(asyncio.create_task(TrainingScheduler(training, sender_t).run_forever()))
         dp = build_dispatcher(AppContext(settings, assistant, sessions, voice, media, training))

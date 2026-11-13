@@ -12,7 +12,7 @@ from aiogram.client.telegram import TelegramAPIServer
 from sqlalchemy import select
 
 from pai.bot.app import AppContext, build_dispatcher
-from pai.bot.handlers.training import TrainingTelegramSender
+from pai.bot.handlers.training import SilenceGuard, TrainingTelegramSender
 from pai.db.models import TrainingRecord
 from pai.training.config import load_training_config
 from pai.training.parser import parse_caption, parse_when
@@ -83,7 +83,9 @@ async def tb(tg, make_assistant, sessions):
     assistant = make_assistant()
     svc = TrainingService(sessions, load_training_config(), now=lambda: CLOCK.now)
     await svc.set_group(GROUP)
+    await svc.set_silent(False)  # эти сценарии — в режиме «отвечать»; тихий режим — отдельные тесты
     bot = Bot("123456:TEST", session=AiohttpSession(api=TelegramAPIServer.from_base(tg.url)))
+    bot.session.middleware(SilenceGuard(svc, {OWNER}))
     dp = build_dispatcher(AppContext(assistant._settings, assistant, sessions, training=svc))
     sched = TrainingScheduler(svc, TrainingTelegramSender(bot, OWNER))
 
@@ -363,9 +365,12 @@ async def test_bind_group_and_ignore_other_groups(tg, make_assistant, sessions) 
     assert sent(await send(gmsg(tg, IVAN, voice()))) == []
     assert sent(await send(gmsg(tg, IVAN, {"text": "/bind"}))) == []  # не владелец
     assert await svc.group_id() is None
-    assert "Группа подключена" in sent(await send(gmsg(tg, OWNER, {"text": "/bind"}, name="Владелец")))[0]
+    calls = await send(gmsg(tg, OWNER, {"text": "/bind"}, name="Владелец"))
+    assert sent(calls, chat=GROUP) == []  # подтверждение — владельцу в личку, в группе тишина
+    assert "Группа подключена. Тихий режим включён" in sent(calls, chat=OWNER)[0]
     assert await svc.group_id() == GROUP
-    assert [m for m, _ in await send(gmsg(tg, IVAN, voice("Иван | A | ✅"))) if m == "setMessageReaction"]
+    await send(gmsg(tg, IVAN, voice("Иван | A | ✅")))
+    assert (await svc.employees())[0].name == "Иван"  # запись принята молча
     await bot.session.close()
 
 
@@ -381,3 +386,61 @@ async def test_members_are_registered_by_any_message_join_and_leave(tb) -> None:
     await svc.set_employee(ivan.id, False)  # владелец убрал (/remove)
     await send(gmsg(tg, IVAN, voice("Иван | A | ✅")))
     assert await svc.employees() == []  # после /remove автоматически не возвращается
+
+
+
+async def test_silent_mode_is_default_and_bot_says_nothing_to_group_or_employees(tb, sessions, script) -> None:
+    send, tick, tg, svc, _a = tb
+    async with sessions() as s, s.begin():  # настройки нет — как при первом запуске
+        from pai.db.models import TrainingSetting
+
+        await s.delete(await s.get(TrainingSetting, "silent"))
+    assert await svc.silent() is True  # по умолчанию — тихий режим
+    CLOCK.now = at(10, 30)
+    calls = []
+    calls += await send(gmsg(tg, IVAN, voice("Иван | A | ✅")))                       # запись с подписью
+    calls += await send(gmsg(tg, OLYA, voice(), name="Оля"))                         # без подписи
+    calls += await send(gmsg(tg, OLYA, voice("Оля | B | перенос в 15:00"), name="Оля"))
+    calls += await send(gmsg(tg, PETYA, {"text": "@mira_test_bot как закрыть клиента?"}, name="Петя"))
+    calls += await send(lambda: tg.push_text(IVAN, "/start"))
+    calls += await send(lambda: tg.push_text(IVAN, "как отработать возражение?"))
+    first = (await records(sessions))[0]
+    calls += await send(gmsg(tg, OWNER, {"text": "8/10"}, name="Владелец", reply_to=first.message_id))
+    for d, h, m in ((4, 15, 0), (7, 13, 0), (7, 14, 30), (7, 19, 30)):
+        CLOCK.now = at(h, m, d=d)
+        calls += await tick()
+    to_others = [(m, p) for m, p in calls if "chat_id" in p and int(p["chat_id"]) != OWNER]
+    assert to_others == []  # ни сообщений, ни реакций — в группе и сотрудникам тишина
+    owner = sent(calls, chat=OWNER)
+    assert any("как закрыть клиента" in x for x in owner) and any("как отработать возражение" in x for x in owner)
+    assert any(x.startswith("📊") and "Тихий режим" in x for x in owner)  # отчёты владельцу приходят
+    recs = await records(sessions)
+    assert len(recs) == 3 and recs[0].score == 8  # записи и оценки сохраняются молча
+    assert script.seen == []
+
+
+async def test_silent_switch_and_announce(tb) -> None:
+    send, _t, tg, svc, _a = tb
+    await svc.set_silent(True)
+    o = lambda text: lambda: tg.push_text(OWNER, text)  # noqa: E731
+    assert "Тихий режим включён" in sent(await send(o("/silent")))[0]
+    calls = await send(o("/announce Собрание в 10:00"))
+    assert sent(calls, chat=GROUP) == ["Собрание в 10:00"]  # явная команда владельца проходит
+    assert "Бот отвечает в группе" in sent(await send(o("/silent off")))[0]
+    assert not await svc.silent()
+    assert [m for m, _ in await send(gmsg(tg, IVAN, voice("Иван | A | ✅"))) if m == "setMessageReaction"]
+    await send(o("/silent on"))
+    assert [m for m, _ in await send(gmsg(tg, IVAN, voice("Иван | B | ✅"))) if m == "setMessageReaction"] == []
+
+
+async def test_guard_blocks_anything_to_group_in_silent_mode(tb) -> None:
+    send, _t, tg, svc, _a = tb
+    await svc.set_silent(True)
+    before = len(tg.calls)
+    bot = Bot("123456:TEST", session=AiohttpSession(api=TelegramAPIServer.from_base(tg.url)))
+    bot.session.middleware(SilenceGuard(svc, {OWNER}))
+    await bot.send_message(GROUP, "случайный текст из любого места кода")
+    await bot.send_message(IVAN, "и сотруднику тоже")
+    await bot.send_message(OWNER, "а владельцу — можно")
+    await bot.session.close()
+    assert [int(p["chat_id"]) for m, p in tg.calls[before:] if m == "sendMessage"] == [OWNER]

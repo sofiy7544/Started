@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import logging
 import re
+from contextvars import ContextVar
 from datetime import date, timedelta
 from html import escape
 
 from aiogram import Bot, F, Router
+from aiogram.client.session.middlewares.base import BaseRequestMiddleware
 from aiogram.enums import ChatType
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandObject, Filter
@@ -58,6 +60,8 @@ def message_link(message: Message) -> str | None:
 
 
 async def _react(bot: Bot, message: Message, app: AppContext) -> None:
+    if await app.training.silent():
+        return
     cfg = app.training.config
     try:
         await bot.set_message_reaction(message.chat.id, message.message_id,
@@ -92,7 +96,10 @@ async def group_message(message: Message, bot: Bot, app: AppContext) -> None:
         return
     if message.text and message.text.split()[0].split("@")[0] == "/bind" and is_owner(app, u.id):
         await svc.set_group(message.chat.id)
-        await message.reply("Группа подключена: записи и проверки — здесь.")
+        note = " Тихий режим включён: в группе я молчу и только записываю. Включить ответы — /silent off." \
+            if await svc.silent() else ""
+        title = f" «{escape(message.chat.title)}»" if message.chat.title else ""
+        await _to_owner(bot, app, f"Группа{title} подключена.{note}")
         return
     if message.chat.id != await svc.group_id():
         return  # чужие группы — молча игнорируем
@@ -119,6 +126,8 @@ async def group_message(message: Message, bot: Bot, app: AppContext) -> None:
         cap = parse_caption(message.caption)
         rec = await svc.add_record(person, cap, kind=kind, file_id=file_id, chat_id=message.chat.id,
                                    message_id=message.message_id, link=message_link(message))
+        if await svc.silent():
+            return  # тихий режим: записываем молча
         if rec.result is None:
             await message.reply(cfg.text("ask_caption"))
         elif rec.result == "rescheduled" and rec.reschedule_at is None:
@@ -138,7 +147,7 @@ async def group_message(message: Message, bot: Bot, app: AppContext) -> None:
             if cap.complete:
                 await svc.update_caption(message.chat.id, replied.message_id, cap)
                 await _react(bot, replied, app)
-            else:
+            elif not await svc.silent():
                 await message.reply(cfg.text("ask_caption"))
             return
     day = svc.local_now().date()
@@ -152,7 +161,8 @@ async def group_message(message: Message, bot: Bot, app: AppContext) -> None:
         me.username and f"@{me.username.lower()}" in text.lower())
     if addressed:
         await _to_owner(bot, app, f"❓ Вопрос от {escape(person.name)} (из группы):\n{escape(text)}")
-        await message.reply(cfg.text("question_redirect"))
+        if not await svc.silent():
+            await message.reply(cfg.text("question_redirect"))
 
 
 async def _owner_in_group(message: Message, bot: Bot, app: AppContext) -> None:
@@ -165,6 +175,8 @@ async def _owner_in_group(message: Message, bot: Bot, app: AppContext) -> None:
     if rec is None:
         return
     await app.training.score(rec.id, text)
+    if await app.training.silent():
+        return
     try:  # знак, что оценка сохранена; к комментарию бот ничего не дописывает
         await bot.set_message_reaction(message.chat.id, message.message_id, reaction=[ReactionTypeEmoji(emoji="✍")])
     except TelegramAPIError:
@@ -214,6 +226,13 @@ async def employee_private(message: Message, bot: Bot, app: AppContext) -> None:
         return
     text = (message.text or message.caption or "").strip()
     command = text.split()[0].split("@")[0].lower() if text.startswith("/") else ""
+    if await svc.silent():
+        # Тихий режим: сотруднику не отвечаем; вопрос (не команду) молча передаём владельцу.
+        await svc.set_dm_ok(person.id)
+        if text and not command:
+            await _to_owner(bot, app, f"❓ {escape(person.name)} написал боту в личку (тихий режим, ответа не было):\n"
+                                      f"{escape(text)}")
+        return
     if command == "/start":
         await svc.set_dm_ok(person.id)
         await message.answer(cfg.text("employee_start"))
@@ -297,7 +316,11 @@ async def cmd_add_remove(message: Message, command: CommandObject, app: AppConte
     if target is None:
         return
     await app.training.set_employee(target.id, adding)
-    await message.answer(f"{'Добавлен в список' if adding else 'Убран из списка'}: {escape(target.name)}", parse_mode="HTML")
+    note = f"{'Добавлен в список' if adding else 'Убран из списка'}: {escape(target.name)}"
+    if message.chat.type == ChatType.PRIVATE:
+        await message.answer(note, parse_mode="HTML")
+    else:  # команда в группе — подтверждение только владельцу в личку, в группе тишина
+        await message.bot.send_message(message.from_user.id, note, parse_mode="HTML")
 
 
 _DATE = re.compile(r"(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?")
@@ -386,6 +409,25 @@ async def cmd_schedule(message: Message, command: CommandObject, app: AppContext
     await message.answer("Сохранено.\n" + new.describe())
 
 
+async def cmd_silent(message: Message, command: CommandObject, app: AppContext) -> None:
+    svc = app.training
+    arg = (command.args or "").strip().lower()
+    if arg in ("on", "вкл", "да"):
+        await svc.set_silent(True)
+    elif arg in ("off", "выкл", "нет"):
+        await svc.set_silent(False)
+    elif arg:
+        await message.answer("Использование: /silent on — молчать, /silent off — отвечать")
+        return
+    if await svc.silent():
+        await message.answer("🔇 Тихий режим включён: в группе и сотрудникам бот ничего не пишет и не отвечает, "
+                             "только молча записывает записи и оценки. Отчёты и команды — вам.\n"
+                             "Включить ответы и проверки: /silent off")
+    else:
+        await message.answer("🔊 Бот отвечает в группе: просит подписи, ставит реакции, упоминает тех, у кого "
+                             "нет записей 2 рабочих дня, напоминает о переносах.\nВыключить: /silent on")
+
+
 async def cmd_announce(message: Message, command: CommandObject, bot: Bot, app: AppContext) -> None:
     group = await app.training.group_id()
     if group is None:
@@ -394,7 +436,11 @@ async def cmd_announce(message: Message, command: CommandObject, bot: Bot, app: 
     if not command.args:
         await message.answer("Использование: /announce текст сообщения для группы")
         return
-    await bot.send_message(group, command.args)  # дословно, без добавлений
+    token = ANNOUNCE.set(True)  # явная команда владельца — разрешена и в тихом режиме
+    try:
+        await bot.send_message(group, command.args)  # дословно, без добавлений
+    finally:
+        ANNOUNCE.reset(token)
     await message.answer("Отправлено в группу.")
 
 
@@ -419,11 +465,36 @@ def create_router() -> Router:
     r.message.register(cmd_off, *owner_private, Command("off"))
     r.message.register(cmd_schedule, *owner_private, Command("schedule"))
     r.message.register(cmd_announce, *owner_private, Command("announce"))
+    r.message.register(cmd_silent, *owner_private, Command("silent"))
     r.message.register(group_message, F.chat.type.in_(GROUPS))
     r.edited_message.register(group_edited, F.chat.type.in_(GROUPS))
     r.chat_member.register(member_update, F.chat.type.in_(GROUPS))
     r.message.register(employee_private, F.chat.type == ChatType.PRIVATE, NotOwner())
     return r
+
+
+ANNOUNCE: ContextVar[bool] = ContextVar("training_announce", default=False)
+_OUTGOING = {"SendMessage", "SendVoice", "SendDocument", "SendPhoto", "SendVideo", "SendAudio", "SendVideoNote",
+             "SendSticker", "SendAnimation", "SendMediaGroup", "SendLocation", "SendContact", "SendPoll", "SendDice",
+             "ForwardMessage", "ForwardMessages", "CopyMessage", "CopyMessages", "SetMessageReaction",
+             "SendChatAction", "PinChatMessage"}
+
+
+class SilenceGuard(BaseRequestMiddleware):
+    """Страховка тихого режима на выходе из бота: всё, что адресовано не владельцу (группа,
+    сотрудники, посторонние), не отправляется. Исключение — /announce владельца."""
+
+    def __init__(self, training, owner_ids: set[int]) -> None:  # type: ignore[no-untyped-def]
+        self._training = training
+        self._owners = owner_ids
+
+    async def __call__(self, make_request, bot, method):  # type: ignore[no-untyped-def]
+        chat_id = getattr(method, "chat_id", None)
+        if (type(method).__name__ in _OUTGOING and chat_id is not None and chat_id not in self._owners
+                and not ANNOUNCE.get() and await self._training.silent()):
+            log.info("silent mode: blocked %s to %s", type(method).__name__, chat_id)
+            return True if type(method).__name__ in ("SetMessageReaction", "SendChatAction", "PinChatMessage") else None
+        return await make_request(bot, method)
 
 
 class TrainingTelegramSender:

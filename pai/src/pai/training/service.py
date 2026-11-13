@@ -101,6 +101,14 @@ class TrainingService:
     async def set_group(self, chat_id: int) -> None:
         await self._set_setting("group_chat_id", str(chat_id))
 
+    async def silent(self) -> bool:
+        """Тихий режим (по умолчанию включён): бот ничего не пишет в группу и сотрудникам,
+        только молча записывает. Включается/выключается владельцем: /silent on|off."""
+        return (await self._get_setting("silent") or "1") == "1"
+
+    async def set_silent(self, value: bool) -> None:
+        await self._set_setting("silent", "1" if value else "0")
+
     async def schedule(self) -> Schedule:
         raw = await self._get_setting("schedule")
         return Schedule.from_dict(json.loads(raw), self.config.schedule) if raw else self.config.schedule

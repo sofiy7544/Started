@@ -226,6 +226,7 @@ TRAINING_COMMANDS = [
     BotCommand(command="off", description="Обучение: выходной/отпуск сотрудника"),
     BotCommand(command="schedule", description="Обучение: рабочие часы и проверки"),
     BotCommand(command="announce", description="Обучение: сообщение в группу"),
+    BotCommand(command="silent", description="Обучение: тихий режим вкл/выкл"),
 ]
 EMPLOYEE_COMMANDS = [
     BotCommand(command="my", description="Моя статистика за неделю"),

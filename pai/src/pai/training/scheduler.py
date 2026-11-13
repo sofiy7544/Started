@@ -45,9 +45,11 @@ class TrainingScheduler:
         t = local.time()
         cfg = svc.config
 
+        quiet = await svc.silent()  # тихий режим: в группу и сотрудникам — ничего, отчёты владельцу — да
+
         # 1. Проверка: нет ни одной записи idle_days рабочих дней подряд (и сегодня пока тоже) —
         #    одно упоминание в группе на весь такой период. Одна запись за эти дни — норма.
-        if group and workday and sched.first_check <= t < sched.work_end:
+        if group and workday and not quiet and sched.first_check <= t < sched.work_end:
             for p in await svc.employees():
                 if await svc.is_off(p.id, day) or await svc.count_on(p.id, day):
                     continue
@@ -62,7 +64,7 @@ class TrainingScheduler:
                 await self.sender.to_group(group, text.replace("{name}", mention(p)))
 
         # 2. Нет ответа и записей за followup_minutes после упоминания — в личку (если запускал бота).
-        if workday:
+        if workday and not quiet:
             for p in await svc.employees():
                 pinged = await svc.job_time("ping", f"{day}:{p.id}")
                 if pinged is None or now < pinged + timedelta(minutes=sched.followup_minutes):
@@ -73,7 +75,7 @@ class TrainingScheduler:
                     await self.sender.to_person(p.tg_id, escape(cfg.text("no_records_dm")))
 
         # 3. Напоминания о переносах — в день переноса.
-        for rec, p in await svc.due_reschedules(now):
+        for rec, p in [] if quiet else await svc.due_reschedules(now):
             if not await svc.claim("resched", str(rec.id)):
                 continue
             when = rec.reschedule_at.astimezone(svc.tz) if rec.reschedule_at.tzinfo else rec.reschedule_at

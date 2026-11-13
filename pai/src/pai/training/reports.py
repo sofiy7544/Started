@@ -54,6 +54,8 @@ async def daily_report(svc: TrainingService, day: date) -> str:
     stats = await svc.stats(day, day)
     reasons = await svc.reasons_on(day)
     lines = [f"📊 Отчёт за {day:%d.%m.%Y}"]
+    if await svc.silent():
+        lines[0] += "\n🔇 Тихий режим: в группе бот молчит (включить ответы — /silent off)"
     if not stats:
         return lines[0] + "\nСотрудников в списке пока нет — они появятся после первой записи в группе."
     total = sum(s.total for s in stats)
