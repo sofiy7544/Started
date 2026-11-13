@@ -81,10 +81,11 @@ class AccessMiddleware(BaseMiddleware):
 
     def __init__(self, allowed: set[int], sessions: async_sessionmaker,
                  clock: Callable[[], float] = time.monotonic,
-                 training: TrainingService | None = None) -> None:
+                 training: TrainingService | None = None, leave_groups: bool = False) -> None:
         self._allowed = allowed
         self._sessions = sessions
         self._training = training
+        self._leave_groups = leave_groups  # личный бот: в группах не сидит, выходит сам
         self._clock = clock
         self._last_notice: dict[int, float] = {}
 
@@ -94,6 +95,24 @@ class AccessMiddleware(BaseMiddleware):
     ) -> Any:
         if not isinstance(event, Update):
             return await handler(event, data)
+        if self._leave_groups:
+            chat = None
+            if event.my_chat_member is not None:
+                chat = event.my_chat_member.chat
+                if event.my_chat_member.new_chat_member.status in ("left", "kicked"):
+                    chat = None  # уже вышел
+            else:
+                msg = event.message or event.edited_message
+                chat = msg.chat if msg is not None else None
+            if chat is not None and chat.type in ("group", "supergroup", "channel"):
+                bot: Bot | None = data.get("bot")
+                if bot is not None:
+                    try:
+                        await bot.leave_chat(chat.id)
+                        log.info("personal bot left group %s", chat.id)
+                    except Exception:  # noqa: BLE001
+                        log.warning("could not leave group %s", chat.id)
+                return None
         if event.chat_member is not None:  # вступил/вышел из группы — только модулю обучения
             return await handler(event, data) if self._training is not None else None
         sender = _sender_id(event)
@@ -199,8 +218,9 @@ def build_dispatcher(app: AppContext) -> Dispatcher:
         )
     dp["collector"] = collector
     # Сначала белый список: посторонние апдейты даже не попадают в журнал дедупликации.
+    leave = app.training is None and bool(app.settings.training_bot_token)  # группой занимается другой бот
     dp.update.outer_middleware(AccessMiddleware(set(app.settings.allowed_telegram_ids), app.sessions,
-                                                training=app.training))
+                                                training=app.training, leave_groups=leave))
     dp.update.outer_middleware(DedupMiddleware(app.sessions))
     dp.errors.register(on_error)
     if app.training is not None:

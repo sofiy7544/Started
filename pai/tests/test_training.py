@@ -470,3 +470,28 @@ async def test_separate_group_bot_has_no_personal_assistant(tg, settings, sessio
     assert sent(await send(lambda: tg.push_text(IVAN, "/tasks")), chat=IVAN) == []  # тихий режим
     assert script.seen == []  # ИИ не вызывался ни разу
     await bot.session.close()
+
+
+async def test_personal_bot_leaves_any_group_when_group_bot_exists(tg, make_assistant, sessions, script) -> None:
+    assistant = make_assistant(settings_override={"training_bot_token": "1:GROUPBOT"})
+    bot = Bot("123456:TEST", session=AiohttpSession(api=TelegramAPIServer.from_base(tg.url)))
+    dp = build_dispatcher(AppContext(assistant._settings, assistant, sessions))
+
+    async def send(push) -> list:
+        before = len(tg.calls)
+        push()
+        await dp.feed_raw_update(bot, tg.updates.get_nowait())
+        return tg.calls[before:]
+
+    calls = await send(gmsg(tg, OWNER, {"text": "привет, бот"}, name="Владелец"))
+    assert [(m, int(p["chat_id"])) for m, p in calls if m == "leaveChat"] == [("leaveChat", GROUP)]
+    tg.updates.put_nowait({"update_id": 7777, "my_chat_member": {
+        "chat": {"id": -555, "type": "supergroup", "title": "Ещё группа"}, "date": 1,
+        "from": {"id": IVAN, "is_bot": False, "first_name": "Иван"},
+        "old_chat_member": {"status": "left", "user": {"id": 42, "is_bot": True, "first_name": "Leta"}},
+        "new_chat_member": {"status": "member", "user": {"id": 42, "is_bot": True, "first_name": "Leta"}}}})
+    calls = await send(lambda: None)
+    assert [int(p["chat_id"]) for m, p in calls if m == "leaveChat"] == [-555]  # добавили — сразу вышел
+    script.replies = ["Привет!"]
+    assert sent(await send(lambda: tg.push_text(OWNER, "привет"))) == ["Привет!"]  # в личке работает
+    await bot.session.close()

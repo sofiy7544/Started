@@ -128,7 +128,8 @@ async def run(settings: Settings, *, engine: ChatEngine | None = None, verify: b
                  me.username, len(settings.allowed_telegram_ids), available,
                  settings.monthly_budget_usd, await assistant.budget.spent_this_month())
         await dp.start_polling(
-            bot, allowed_updates=["message", "edited_message", "callback_query", "chat_member"]
+            bot,
+            allowed_updates=["message", "edited_message", "callback_query", "chat_member", "my_chat_member"],
         )
     finally:
         if dp is not None and dp.get("collector") is not None:
